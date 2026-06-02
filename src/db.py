@@ -8,7 +8,8 @@ de forma transparente independentemente do backend.
 Public API
 ----------
 is_cloud, get_engine, get_con, read_table, write_table, append_table,
-execute_sql, fetch_sql, table_columns, add_column, ensure_table
+execute_sql, fetch_sql, table_columns, add_column, ensure_table,
+sync_cloud_seed_if_newer
 """
 
 from __future__ import annotations
@@ -53,6 +54,7 @@ def _detect_cloud() -> bool:
 
 
 _CLOUD_MODE: bool = _detect_cloud()
+_LAST_SYNCED_SEED_VERSION: str | None = None
 
 # ---------------------------------------------------------------------------
 # Funções públicas – modo
@@ -405,6 +407,14 @@ _KNOWN_TABLES: list[str] = [
     "inconsistencias_manuais",
     "visual_preferences",
     "consolidado_historico",
+    "metadata",
+]
+
+_SEED_SYNC_TABLES: list[str] = [
+    "base_dinamica",
+    "faturamento",
+    "contabilidade",
+    "metadata",
 ]
 
 
@@ -456,3 +466,75 @@ def auto_migrate_from_sqlite() -> None:
 
     logger.info("auto_migrate: Concluido. %d tabelas, %d erros.", migrated, len(errors))
 
+
+def _read_sqlite_metadata_value(key: str) -> str:
+    if not DB_PATH.exists():
+        return ""
+    try:
+        con = sqlite3.connect(str(DB_PATH))
+        try:
+            row = pd.read_sql(
+                "SELECT valor FROM metadata WHERE chave = ?",
+                con,
+                params=(key,),
+            )
+            if row.empty:
+                return ""
+            return str(row["valor"].iloc[0] or "").strip()
+        finally:
+            con.close()
+    except Exception:
+        return ""
+
+
+def _read_cloud_metadata_value(key: str) -> str:
+    try:
+        row = fetch_sql(
+            "SELECT valor FROM metadata WHERE chave = ?",
+            (key,),
+        )
+        if row.empty:
+            return ""
+        return str(row["valor"].iloc[0] or "").strip()
+    except Exception:
+        return ""
+
+
+def sync_cloud_seed_if_newer() -> None:
+    """Synchronize operational tables from embedded SQLite to PostgreSQL by version.
+
+    This keeps Streamlit Cloud updated after a repository deploy without
+    overwriting runtime-only tables such as visual preferences or comments.
+    """
+    global _LAST_SYNCED_SEED_VERSION
+
+    if not _CLOUD_MODE or not DB_PATH.exists():
+        return
+
+    seed_version = _read_sqlite_metadata_value("base_seed_version")
+    if not seed_version:
+        return
+    if _LAST_SYNCED_SEED_VERSION == seed_version:
+        return
+
+    cloud_version = _read_cloud_metadata_value("base_seed_version")
+    if cloud_version == seed_version:
+        logger.info("seed sync: PostgreSQL ja esta na versao %s.", seed_version)
+        _LAST_SYNCED_SEED_VERSION = seed_version
+        return
+
+    logger.info("seed sync: atualizando PostgreSQL de '%s' para '%s'.", cloud_version, seed_version)
+    from sqlalchemy import create_engine as _sa_create_engine
+
+    sqlite_engine = _sa_create_engine(f"sqlite:///{DB_PATH}")
+    pg_engine = get_engine()
+    for tbl in _SEED_SYNC_TABLES:
+        try:
+            df = pd.read_sql(f"SELECT * FROM {tbl}", sqlite_engine)
+            df.to_sql(tbl, pg_engine, index=False, if_exists="replace",
+                      method="multi", chunksize=5_000)
+            logger.info("seed sync: '%s' -> %d linhas.", tbl, len(df))
+        except Exception as exc:
+            logger.error("seed sync: erro em '%s': %s", tbl, exc)
+            return
+    _LAST_SYNCED_SEED_VERSION = seed_version

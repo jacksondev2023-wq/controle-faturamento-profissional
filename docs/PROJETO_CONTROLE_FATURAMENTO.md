@@ -11,7 +11,9 @@ O foco visual e operacional e uma apresentacao para diretoria: telas limpas, ind
 - Python
 - Streamlit
 - Pandas
-- SQLite
+- SQLite local
+- PostgreSQL/Neon em producao
+- SQLAlchemy
 - OpenPyXL
 - XlsxWriter
 
@@ -21,13 +23,14 @@ Arquivos principais:
 - `src/etl.py`: leitura, limpeza, parser da aba `DINAMICA`, DE/PARA e consolidacao.
 - `scripts/import_dinamica_base.py`: importacao direta da aba `DINAMICA` via terminal.
 - `scripts/seed_database.py`: recria a base inicial quando `data/app.db` nao existe.
-- `data/app.db`: banco SQLite usado pelo app local.
+- `src/db.py`: camada de banco dual-mode, usando SQLite local e PostgreSQL no Streamlit Cloud.
+- `data/app.db`: banco SQLite local e seed versionado para sincronizacao inicial/atualizacao operacional no cloud.
 - `.streamlit/config.toml`: tema e configuracao base para deploy.
 - `render.yaml`: blueprint para deploy em Render.
 
 ## Modelo De Dados
 
-Tabelas principais no SQLite:
+Tabelas principais no banco ativo (SQLite local ou PostgreSQL em producao):
 
 - `base_dinamica`: fonte principal quando a aba `DINAMICA` foi importada.
 - `faturamento`: base normalizada de faturamento por unidade, operadora e mes.
@@ -38,6 +41,10 @@ Tabelas principais no SQLite:
 - `importacoes`: historico de arquivos importados.
 - `exportacoes`: historico de relatorios gerados.
 - `inconsistencias_manuais`: tratamento operacional de inconsistencias.
+- `visual_preferences`: preferencias persistidas de cards e colunas.
+- `metadata`: metadados de versao da base e contexto tecnico.
+
+Em producao, o app detecta `[connections.postgresql]` em `st.secrets` e usa PostgreSQL automaticamente. Sem secrets, usa `data/app.db`.
 
 ## Importacao Da Aba DINAMICA
 
@@ -56,6 +63,23 @@ Colunas reconhecidas pelo parser:
 - `observacao`
 
 Os totais da planilha nao sao usados. O sistema recalcula totais, diferencas e percentuais a partir das linhas de unidade e operadora.
+
+### Base validada em 02/06/2026
+
+Arquivo usado: `RELATORIO_FAT_ABR_REC_ABR_MAI 01-06-26 (1).xlsx`, aba `DINAMICA`.
+
+Validacao aplicada:
+
+- 120 linhas da planilha encontradas na base.
+- 21 linhas historicas preservadas para marco, com abril/maio zerados.
+- `faturado_abril`: R$ 19.791.682,33.
+- `rec_bruto_abril`: R$ 20.914.898,01.
+- `rec_liquido_abril`: R$ 20.013.112,58.
+- `rec_bruto_maio`: R$ 15.454.014,26.
+- `rec_liquido_maio`: R$ 14.349.406,00.
+- 32 observacoes da planilha confirmadas na base.
+
+O marcador `metadata.base_seed_version` controla a sincronizacao da base operacional com o PostgreSQL no deploy.
 
 Exemplo de importacao complementar via terminal:
 
@@ -149,7 +173,7 @@ Central tecnica do sistema:
 
 As abas de apresentacao nao exibem controles de configuracao. A configuracao fica separada em `Configuracoes`.
 
-As preferencias ficam registradas na tabela SQLite `visual_preferences`:
+As preferencias ficam registradas na tabela `visual_preferences` do banco ativo:
 
 - ocultar/reexibir cards;
 - ocultar/reexibir colunas;
@@ -160,7 +184,7 @@ Colunas `Unidade` e `Operadora` ficam sempre visiveis para preservar leitura exe
 
 Na tela `Configuracoes`, o usuario precisa clicar em `Salvar preferencias de cards` ou `Salvar preferencias de colunas` para aplicar a configuracao nas abas principais.
 
-Observacao sobre deploy gratuito: no Streamlit Community Cloud, alteracoes em SQLite local funcionam durante a vida da instancia, mas podem ser perdidas em reinicios/redeploys. Para persistencia definitiva entre usuarios e reinicios, migrar `visual_preferences`, comentarios e base operacional para um banco externo, como PostgreSQL/Supabase/Neon.
+No Streamlit Community Cloud, essas preferencias ficam persistidas no PostgreSQL/Neon e permanecem apos reinicios/redeploys. A leitura de preferencias nao usa cache, e a gravacao usa UPSERT para evitar perda entre usuarios.
 
 ## Cuidados Com Dados Sensíveis
 
@@ -197,7 +221,17 @@ Passos:
 2. Acessar `https://share.streamlit.io`.
 3. Criar app apontando para o repositorio, branch e arquivo `app.py`.
 4. Selecionar a versao de Python nas configuracoes avancadas, se necessario.
-5. Publicar e compartilhar a URL com os usuarios autorizados.
+5. Configurar o secret `[connections.postgresql]` com `connection_url` do Neon.
+6. Publicar e compartilhar a URL com os usuarios autorizados.
+
+Exemplo seguro de secrets:
+
+```toml
+[connections.postgresql]
+connection_url = "postgresql://USER:PASSWORD@HOST/neondb?sslmode=require"
+```
+
+Nao versionar credenciais reais. O arquivo `.streamlit/secrets.toml` local deve permanecer no `.gitignore`.
 
 Documentacao oficial:
 

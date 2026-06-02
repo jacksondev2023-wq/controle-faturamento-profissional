@@ -109,6 +109,7 @@ def seed_database():
         {"chave": "projeto", "valor": "Controle Faturamento x Recebimento"},
         {"chave": "observacao", "valor": "Base inicial criada com arquivos enviados no ChatGPT."},
         {"chave": "limite_marco", "valor": "Março existe como histórico consolidado. Para rastreio completo, importar faturamento/contabilidade brutos de março."},
+        {"chave": "base_seed_version", "valor": "2026-06-02_relatorio_fat_abr_rec_abr_mai_v2"},
     ]).to_sql("metadata", con, index=False, if_exists="replace")
 
     con.close()

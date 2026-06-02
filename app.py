@@ -38,6 +38,7 @@ from src.db import (
     ensure_table as _db_ensure_table,
     is_cloud as _db_is_cloud,
     auto_migrate_from_sqlite as _db_auto_migrate,
+    sync_cloud_seed_if_newer as _db_sync_cloud_seed,
     DB_PATH,
 )
 
@@ -828,14 +829,44 @@ def init_db_if_needed():
         from scripts.seed_database import seed_database
         seed_database()
 
-def read_table(name: str) -> pd.DataFrame:
+def _db_cache_token() -> str:
+    if _db_is_cloud():
+        return "cloud"
+    try:
+        return str(DB_PATH.stat().st_mtime_ns)
+    except Exception:
+        return "local-missing"
+
+@st.cache_data(show_spinner=False, ttl=300)
+def _cached_read_table(name: str, token: str) -> pd.DataFrame:
     return _db_read_table(name)
+
+@st.cache_data(show_spinner=False, ttl=300)
+def _cached_fetch_sql(sql: str, params: tuple | None, token: str) -> pd.DataFrame:
+    return _db_fetch_sql(sql, params)
+
+def clear_data_caches():
+    try:
+        _cached_read_table.clear()
+        _cached_fetch_sql.clear()
+        load_operational_tables.clear()
+        df_to_excel_bytes.clear()
+    except Exception:
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
+
+def read_table(name: str) -> pd.DataFrame:
+    return _cached_read_table(name, _db_cache_token()).copy()
 
 def write_table(name: str, df: pd.DataFrame, mode: str = "replace"):
     _db_write_table(name, df, mode)
+    clear_data_caches()
 
 def append_table(name: str, df: pd.DataFrame):
     _db_append_table(name, df)
+    clear_data_caches()
 
 def ensure_visual_preferences_table():
     _db_ensure_table(
@@ -870,20 +901,32 @@ def load_visual_preference(pref_key: str):
 
 def save_visual_preference(pref_key: str, payload):
     ensure_visual_preferences_table()
-    # DELETE + INSERT — funciona em ambos SQLite e PostgreSQL sem exigir PK/UNIQUE
-    _db_execute_sql("DELETE FROM visual_preferences WHERE pref_key = ?", (pref_key,))
-    _db_execute_sql(
-        "INSERT INTO visual_preferences (pref_key, payload, updated_at) VALUES (?, ?, ?)",
-        (
-            pref_key,
-            json.dumps(payload, ensure_ascii=False),
-            datetime.now().strftime("%d/%m/%Y %H:%M"),
-        ),
-    )
+    payload_json = json.dumps(payload, ensure_ascii=False)
+    updated_at = datetime.now().strftime("%d/%m/%Y %H:%M")
+    try:
+        _db_execute_sql(
+            """
+            INSERT INTO visual_preferences (pref_key, payload, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(pref_key) DO UPDATE SET
+                payload = excluded.payload,
+                updated_at = excluded.updated_at
+            """,
+            (pref_key, payload_json, updated_at),
+        )
+    except Exception:
+        # Fallback para bases antigas sem indice unico aplicado.
+        _db_execute_sql("DELETE FROM visual_preferences WHERE pref_key = ?", (pref_key,))
+        _db_execute_sql(
+            "INSERT INTO visual_preferences (pref_key, payload, updated_at) VALUES (?, ?, ?)",
+            (pref_key, payload_json, updated_at),
+        )
+    clear_data_caches()
 
 def delete_visual_preference(pref_key: str):
     ensure_visual_preferences_table()
     _db_execute_sql("DELETE FROM visual_preferences WHERE pref_key = ?", (pref_key,))
+    clear_data_caches()
 
 def ensure_base_dinamica_table():
     _db_ensure_table(
@@ -1032,6 +1075,7 @@ def merge_base_dinamica(existing: pd.DataFrame, incoming: pd.DataFrame, selected
 
     return normalize_base_dinamica(out.drop(columns="_key", errors="ignore"))
 
+@st.cache_data(show_spinner=False, ttl=300)
 def load_operational_tables(year: int = 2026) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     ensure_base_dinamica_table()
     base = normalize_base_dinamica(read_table("base_dinamica"))
@@ -1107,8 +1151,10 @@ def ensure_exportacoes_table():
 
     # Preencher exportacao_id para linhas que não têm
     try:
-        rows_df = _db_fetch_sql(
-            "SELECT data_hora, tipo_relatorio, formato, nome_arquivo, periodo, exportacao_id FROM exportacoes"
+        rows_df = _cached_fetch_sql(
+            "SELECT data_hora, tipo_relatorio, formato, nome_arquivo, periodo, exportacao_id FROM exportacoes",
+            None,
+            _db_cache_token(),
         )
         if not rows_df.empty:
             needs_update = rows_df[rows_df["exportacao_id"].fillna("").str.strip() == ""]
@@ -1171,7 +1217,7 @@ def file_already_imported(file_hash: str, tipo_arquivo: str) -> bool:
         return False
     ensure_importacoes_table()
     try:
-        result = _db_fetch_sql(
+        result = _cached_fetch_sql(
             """
             SELECT COUNT(*) AS n
             FROM importacoes
@@ -1180,6 +1226,7 @@ def file_already_imported(file_hash: str, tipo_arquivo: str) -> bool:
               AND status IN ('Importado com sucesso', 'Importado com avisos', 'Base inicial')
             """,
             (file_hash, tipo_arquivo),
+            _db_cache_token(),
         )
         return int(result["n"].iloc[0]) > 0
     except Exception:
@@ -1495,9 +1542,12 @@ def render_kpi_settings(state_key: str, title: str, items: list[tuple[str, str]]
     c1, c2 = st.columns([1, 3])
     with c1:
         if st.button("Salvar preferências de cards", type="primary", key=f"{state_key}_save_kpis"):
-            save_visual_preference(f"{state_key}_kpis", selected_widget)
-            st.success("Preferências de cards salvas.")
-            st.rerun()
+            if not selected_widget:
+                st.warning("Mantenha pelo menos um card visivel.")
+            else:
+                save_visual_preference(f"{state_key}_kpis", selected_widget)
+                st.success("Preferências de cards salvas.")
+                st.rerun()
     with c2:
         if st.button("Restaurar cards padrão", key=f"{state_key}_reset_kpis"):
             delete_visual_preference(f"{state_key}_kpis")
@@ -3204,7 +3254,7 @@ def save_comentarios_grid(edited: pd.DataFrame, comentarios: pd.DataFrame, mes_r
 
 def render_view_preferences(consolidado: pd.DataFrame, fat_months: list[int], rec_months: list[int]):
     st.markdown('<div class="section-title">Preferências de visualização</div>', unsafe_allow_html=True)
-    st.caption("Configure cards e colunas fora das telas de apresentação. As escolhas ficam ativas na sua sessão atual.")
+    st.caption("Configure cards e colunas fora das telas de apresentação. As escolhas ficam salvas no banco e passam a valer nas telas principais após salvar.")
 
     dash = prepare_dashboard_consolidado(consolidado) if consolidado is not None and not consolidado.empty else pd.DataFrame()
     dashboard_tab, consolidado_tab = st.tabs(["Dashboard Executivo", "Consolidado"])
@@ -3698,6 +3748,7 @@ def render_exportacoes(
 
 init_db_if_needed()
 _db_auto_migrate()  # No primeiro deploy cloud, migra SQLite → PostgreSQL
+_db_sync_cloud_seed()  # Atualiza base operacional no PostgreSQL quando o SQLite embarcado tiver versao mais nova
 ensure_base_dinamica_table()
 ensure_importacoes_table()
 ensure_exportacoes_table()
@@ -3726,7 +3777,12 @@ inconsistencias_atual = merge_inconsistencias_manuais(
     build_inconsistencias(fat, cont, depara, depara_operadoras),
     read_table("inconsistencias_manuais"),
 )
-top_excel = df_to_excel_bytes(consolidado_atual, fat, cont, inconsistencias_atual) if not consolidado_atual.empty else None
+excel_pages = {"Dashboard Executivo", "Consolidado"}
+top_excel = (
+    df_to_excel_bytes(consolidado_atual, fat, cont, inconsistencias_atual)
+    if current_page in excel_pages and not consolidado_atual.empty
+    else None
+)
 
 render_topbar(current_page, top_excel)
 

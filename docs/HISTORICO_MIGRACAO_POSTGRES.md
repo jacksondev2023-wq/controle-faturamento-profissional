@@ -114,6 +114,7 @@ A variável `_CLOUD_MODE` é computada uma vez no nível do módulo.
 | `table_columns(table_name)` | Set de nomes de colunas (PRAGMA ou information_schema) |
 | `add_column(table, col, type)` | ALTER TABLE com mapeamento REAL→DOUBLE PRECISION |
 | `ensure_table(create_sql)` | CREATE TABLE IF NOT EXISTS com cache e conversão de tipos |
+| `sync_cloud_seed_if_newer()` | Sincroniza tabelas operacionais do SQLite embarcado para PostgreSQL por `base_seed_version` |
 
 **Conversões automáticas**:
 - **Placeholders**: `?` → `%s` no modo PostgreSQL (parser character-level que ignora `?` dentro de strings)
@@ -228,18 +229,14 @@ Adicionada linha:
 
 ### 5.2. Credenciais Neon (Produção)
 
-> ⚠️ **ATENÇÃO**: Estas credenciais são sensíveis. Não compartilhar.
+> Credenciais reais não devem ficar em arquivos versionados. Configure a URL de conexão apenas nos Secrets do Streamlit Cloud ou em `.streamlit/secrets.toml` local, que deve permanecer ignorado pelo Git.
 
 | Campo | Valor |
 |-------|-------|
 | **Provider** | Neon.tech |
-| **Host** | `ep-cold-tree-acuzzeuv.sa-east-1.aws.neon.tech` |
-| **Database** | `neondb` |
-| **User** | `neondb_owner` |
-| **Password** | `npg_k4xfwu5sPvDc` |
+| **Host / Database / User / Password** | Armazenados somente em secrets |
 | **SSL** | `sslmode=require` |
-| **Connection URL** | `postgresql://neondb_owner:npg_k4xfwu5sPvDc@ep-cold-tree-acuzzeuv.sa-east-1.aws.neon.tech/neondb?sslmode=require` |
-| **Região** | São Paulo (sa-east-1) |
+| **Região sugerida** | São Paulo (sa-east-1) |
 | **Plano** | Free (0.5 GB) |
 
 ### 5.3. Secrets no Streamlit Cloud
@@ -248,7 +245,7 @@ Configurados em: **share.streamlit.io** → App → Settings → Secrets
 
 ```toml
 [connections.postgresql]
-connection_url = "postgresql://neondb_owner:npg_k4xfwu5sPvDc@ep-cold-tree-acuzzeuv.sa-east-1.aws.neon.tech/neondb?sslmode=require"
+connection_url = "postgresql://USUARIO:SENHA@HOST/neondb?sslmode=require"
 ```
 
 ---
@@ -270,16 +267,21 @@ connection_url = "postgresql://neondb_owner:npg_k4xfwu5sPvDc@ep-cold-tree-acuzze
 ### 6.4. `ON CONFLICT` sem PRIMARY KEY
 - **Problema**: A migração via `df.to_sql()` (pandas) não preserva constraints (PRIMARY KEY, UNIQUE). O `save_visual_preference()` usava `ON CONFLICT(pref_key) DO UPDATE SET` que falhava com `psycopg2.errors.InvalidColumnReference`.
 - **Solução**: 
-  1. Trocado para padrão DELETE + INSERT.
-  2. Adicionado `CREATE UNIQUE INDEX IF NOT EXISTS` no `ensure_visual_preferences_table()`.
+  1. Adicionado `CREATE UNIQUE INDEX IF NOT EXISTS` no `ensure_visual_preferences_table()`.
+  2. Reativado UPSERT atomico para salvar preferencias.
+  3. Adicionado fallback DELETE + INSERT para bases antigas sem indice aplicado.
 
 ### 6.5. Lentidão no carregamento
 - **Problema**: Cada `ensure_*_table()` abria uma conexão nova ao Neon (~200ms cada, cold start ~1-2s).
-- **Solução**: Cache `_ensured_tables` em `ensure_table()` — cada tabela só é verificada 1x por sessão.
+- **Solução**: Cache `_ensured_tables` em `ensure_table()` — cada tabela só é verificada 1x por sessão. O app tambem cacheia leituras de tabelas operacionais por 5 minutos e invalida o cache apos gravacoes.
 
 ### 6.6. `rowid` inexistente no PostgreSQL
 - **Problema**: `ensure_exportacoes_table()` usava `SELECT rowid, ... FROM exportacoes` e `UPDATE ... WHERE rowid = ?`. PostgreSQL não tem `rowid` implícito.
 - **Solução**: Reescrito para usar `data_hora` + `nome_arquivo` como chave de UPDATE.
+
+### 6.7. Atualizacao da base operacional em producao
+- **Problema**: Depois do primeiro deploy, o PostgreSQL ja populado nao era atualizado automaticamente quando `data/app.db` recebia uma nova base validada.
+- **Solução**: Criado `metadata.base_seed_version` e `sync_cloud_seed_if_newer()`. No cloud, o app substitui somente tabelas operacionais (`base_dinamica`, `faturamento`, `contabilidade`, `metadata`) quando a versao embarcada e mais nova/diferente. Preferencias, comentarios, DE/PARA e historicos de uso nao sao apagados.
 
 ---
 
@@ -337,10 +339,10 @@ Não precisa de credenciais ou internet para desenvolvimento local.
 O primeiro carregamento após o Neon "dormir" (inatividade >5 min no plano Free) leva ~2-3s extra (cold start). Carregamentos subsequentes são normais. Possível melhoria: usar connection pooling com `pool_size` maior no SQLAlchemy.
 
 ### 10.2. Supabase abandonado mas conta existe
-O projeto `controle-faturamento` foi criado em `xrieqorssqufztnhixuz.supabase.co` com senha `Residencial200!`. Está vazio e pode ser deletado. A senha foi exposta em chat e deve ser trocada se a conta for reutilizada.
+O projeto Supabase criado durante os testes ficou vazio e pode ser deletado. Como credenciais chegaram a ser compartilhadas durante a configuração, qualquer senha/token relacionado deve ser rotacionado antes de reutilizar a conta.
 
 ### 10.3. Script check_neon.py
-O arquivo `scripts/check_neon.py` é temporário (usado para depuração) e pode ser removido do repositório.
+O arquivo `scripts/check_neon.py` foi mantido como utilitario seguro. Ele nao armazena credenciais; usa somente a variavel de ambiente `DATABASE_URL`.
 
 ### 10.4. `data/app.db` no Git
 O SQLite continua commitado no repositório. Isso é intencional: serve como fallback para dev local e como fonte para a auto-migração no primeiro deploy cloud. Porém, como ele não é atualizado em produção, dados novos inseridos via app no cloud **não refletem** no SQLite do repositório.
@@ -358,7 +360,7 @@ O `df.to_sql()` do pandas não preserva PRIMARY KEY, UNIQUE, NOT NULL, etc. Apen
 ```bash
 # Migrar dados locais para PostgreSQL (one-time)
 python scripts/migrate_to_postgres.py \
-    --pg-url "postgresql://neondb_owner:npg_k4xfwu5sPvDc@ep-cold-tree-acuzzeuv.sa-east-1.aws.neon.tech/neondb?sslmode=require"
+    --pg-url "$DATABASE_URL"
 
 # Verificar dados no Neon
 python scripts/check_neon.py
