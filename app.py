@@ -525,6 +525,7 @@ section[data-testid="stSidebar"] [data-testid="stExpander"] p {
 }
 .native-table .obs-full {
     display: block;
+    max-width: min(1220px, calc(100vw - 180px));
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     word-break: break-word;
@@ -841,7 +842,7 @@ def render_global_parameters():
         rec_months = st.multiselect(
             "Mês(es) de recebimento",
             options=list(MONTHS.keys()),
-            default=[3, 4, 5],
+            default=[4, 5],
             format_func=lambda x: MONTHS[x],
         )
     return int(year), fat_months, rec_months
@@ -1830,23 +1831,10 @@ def render_consolidado_pivot_table(filtered: pd.DataFrame, fat_months: list[int]
     sort_cols = ["unidade_padrao", "diferenca_pendente"] if "diferenca_pendente" in filtered else ["unidade_padrao"]
     filtered_sorted = filtered.sort_values(sort_cols, ascending=[True, False] if len(sort_cols) == 2 else True).copy()
     for unidade, group in filtered_sorted.groupby("unidade_padrao", dropna=False, sort=True):
-        unit_notes = []
-        if "observacoes_consolidadas" in group:
-            for _, obs_row in group.iterrows():
-                obs_text = str(obs_row.get("observacoes_consolidadas", "") or "").strip()
-                if not obs_text:
-                    continue
-                operadora = str(obs_row.get("operadora_padrao", "") or "").strip() or "Operadora"
-                unit_notes.append(f"{operadora}: {obs_text}")
-        obs_count = len(unit_notes)
-        subtotal_obs = ""
-        if obs_count:
-            obs_label = "observação" if obs_count == 1 else "observações"
-            subtotal_obs = f"{obs_count} {obs_label} na unidade\n" + "\n".join(unit_notes)
         rows.append((
             "unit-total-row",
-            aggregate_row(group, str(unidade), f"Total da unidade ({group['operadora_padrao'].nunique()} operadoras)", "Subtotal", subtotal_obs),
-            subtotal_obs,
+            aggregate_row(group, str(unidade), f"Total da unidade ({group['operadora_padrao'].nunique()} operadoras)", "Subtotal", ""),
+            "",
         ))
         details = group.sort_values("diferenca_pendente", ascending=False) if "diferenca_pendente" in group else group
         for _, detail in details.iterrows():
@@ -1860,7 +1848,9 @@ def render_consolidado_pivot_table(filtered: pd.DataFrame, fat_months: list[int]
                     detail_row[col] = float(detail.get(col, 0) or 0) * 100
                 else:
                     detail_row[col] = detail.get(col, "")
-            note = str(detail.get("observacoes_consolidadas", "") or "").strip()
+            obs_text = str(detail.get("observacoes_consolidadas", "") or "").strip()
+            operadora_note = str(detail.get("operadora_padrao", "") or "").strip()
+            note = f"{operadora_note}: {obs_text}" if obs_text and operadora_note else obs_text
             rows.append(("detail-row", detail_row, note))
     rows.append(("grand-total-row", aggregate_row(filtered, "TOTAL GERAL", "", "Total", ""), ""))
 

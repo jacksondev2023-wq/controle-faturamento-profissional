@@ -66,20 +66,20 @@ Os totais da planilha nao sao usados. O sistema recalcula totais, diferencas e p
 
 ### Base validada em 02/06/2026
 
-Arquivo usado: `RELATORIO_FAT_ABR_REC_ABR_MAI 01-06-26 (1).xlsx`, aba `Consolidado Abr-Mai`.
+Arquivo usado: `RELATORIO_FAT_ABR_REC_ABR_MAI 01-06-26 (1).xlsx`, aba `DINAMICA`.
 
 Validacao aplicada:
 
-- 124 pares de unidade/operadora encontrados na planilha e na base.
-- 0 divergencias de nomes de operadoras entre a planilha e o banco.
-- 0 divergencias nos valores de abril e maio.
-- `faturado_abril`: R$ 20.463.800,35.
-- `rec_bruto_abril`: R$ 20.060.625,79.
-- `rec_liquido_abril`: R$ 19.226.831,52.
-- `rec_bruto_maio`: R$ 14.068.593,03.
-- `rec_liquido_maio`: R$ 13.044.637,40.
-- 18 observacoes da planilha confirmadas na base.
-- Os valores de marco foram preservados quando o par unidade/operadora tambem existia na base anterior.
+- 120 pares de unidade/operadora importados da planilha para `base_dinamica`.
+- A base anterior foi substituida; nomes de unidades, operadoras, valores e observacoes seguem a aba `DINAMICA`.
+- `faturado_marco`: R$ 2.245.027,70.
+- `faturado_abril`: R$ 19.791.682,33.
+- `rec_bruto_abril`: R$ 20.914.898,01.
+- `rec_liquido_abril`: R$ 20.013.112,58.
+- `rec_bruto_maio`: R$ 15.454.014,26.
+- `rec_liquido_maio`: R$ 14.349.406,00.
+- 32 observacoes da planilha confirmadas na base.
+- O padrao visual usa faturamento Marco/Abril e recebimentos Abril/Maio. Recebimento de marco nao aparece por padrao porque a aba `DINAMICA` atual nao possui valores recebidos nesse mes.
 
 O marcador `metadata.base_seed_version` controla a sincronizacao da base operacional com o PostgreSQL no deploy.
 
@@ -128,7 +128,8 @@ Tela de apresentacao analitica por unidade e operadora. A tabela funciona como u
 
 - subtotal por unidade;
 - detalhe por operadora;
-- observacoes fiscais/manuais dentro da tabela;
+- observacoes fiscais/manuais em linhas de detalhe abaixo da respectiva operadora, com prefixo do nome da operadora e sem coluna horizontal de observacoes;
+- subtotal por unidade apenas com valores financeiros; nao exibir resumo/total de observacoes abaixo da unidade;
 - destaque visual nas colunas de faturamento;
 - rolagem horizontal controlada para muitas colunas.
 
