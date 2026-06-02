@@ -72,23 +72,34 @@ def get_engine():
 
     * **Cloud**: constrói a connection string a partir de
       ``st.secrets["connections"]["postgresql"]``.
+      Suporta tanto ``connection_url`` (Neon) quanto chaves individuais.
     * **Local**: usa SQLite em ``data/app.db``.
     """
-    from sqlalchemy import create_engine  # import tardio para não exigir sqlalchemy localmente sem necessidade
+    from sqlalchemy import create_engine  # import tardio
 
     if _CLOUD_MODE:
         pg = st.secrets["connections"]["postgresql"]
-        dialect = pg.get("dialect", "postgresql+psycopg2")
-        user = pg["username"]
-        password = pg["password"]
-        host = pg["host"]
-        port = pg.get("port", 5432)
-        database = pg["database"]
-        url = f"{dialect}://{user}:{password}@{host}:{port}/{database}"
-        logger.info("Criando engine PostgreSQL (%s@%s:%s/%s).", user, host, port, database)
-        engine = create_engine(url, pool_pre_ping=True)
+
+        # Modo 1: URL completa (ex.: Neon)
+        if "connection_url" in pg:
+            url = pg["connection_url"]
+            logger.info("Criando engine PostgreSQL via connection_url.")
+            engine = create_engine(url, pool_pre_ping=True)
+        else:
+            # Modo 2: chaves individuais (host, port, username, password, database)
+            dialect = pg.get("dialect", "postgresql+psycopg2")
+            user = pg["username"]
+            password = pg["password"]
+            host = pg["host"]
+            port = pg.get("port", 5432)
+            database = pg["database"]
+            sslmode = pg.get("sslmode", "")
+            url = f"{dialect}://{user}:{password}@{host}:{port}/{database}"
+            if sslmode:
+                url += f"?sslmode={sslmode}"
+            logger.info("Criando engine PostgreSQL (%s@%s:%s/%s).", user, host, port, database)
+            engine = create_engine(url, pool_pre_ping=True)
     else:
-        # Garante que o diretório data/ existe
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         url = f"sqlite:///{DB_PATH}"
         logger.info("Criando engine SQLite (%s).", DB_PATH)
