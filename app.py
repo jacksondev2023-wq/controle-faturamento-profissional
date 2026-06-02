@@ -8,6 +8,7 @@ import json
 import pandas as pd
 import streamlit as st
 import altair as alt
+from streamlit_sortables import sort_items
 
 from src.etl import (
     MONTHS,
@@ -517,6 +518,17 @@ section[data-testid="stSidebar"] [data-testid="stExpander"] p {
     vertical-align: middle;
     overflow-wrap: anywhere;
 }
+.native-table td.obs-col {
+    white-space: normal;
+    line-height: 1.45;
+    vertical-align: top;
+}
+.native-table .obs-full {
+    display: block;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
 .native-table td.faturamento-col {
     background: #F2F6FF !important;
     color: #001945;
@@ -572,9 +584,10 @@ section[data-testid="stSidebar"] [data-testid="stExpander"] p {
     min-width: 220px;
 }
 .pivot-table .obs-col {
-    min-width: 320px;
-    max-width: 380px;
+    min-width: 420px;
+    max-width: 560px;
     white-space: normal;
+    word-break: break-word;
 }
 .pivot-table th:not(:first-child):not(:nth-child(2)):not(.obs-col),
 .pivot-table td:not(:first-child):not(:nth-child(2)):not(.obs-col) {
@@ -641,6 +654,28 @@ div[data-baseweb="select"] input,
 div[data-baseweb="select"] svg {
     color: #11131A !important;
     fill: #11131A !important;
+}
+.stMultiSelect [data-baseweb="tag"],
+div[data-baseweb="select"] [data-baseweb="tag"] {
+    background: #00245D !important;
+    border-color: #00245D !important;
+    color: #FFFFFF !important;
+}
+.stMultiSelect [data-baseweb="tag"] span,
+.stMultiSelect [data-baseweb="tag"] svg,
+div[data-baseweb="select"] [data-baseweb="tag"] span,
+div[data-baseweb="select"] [data-baseweb="tag"] svg {
+    color: #FFFFFF !important;
+    fill: #FFFFFF !important;
+}
+.stMultiSelect [data-baseweb="tag"] *,
+div[data-baseweb="select"] [data-baseweb="tag"] * {
+    color: #FFFFFF !important;
+    fill: #FFFFFF !important;
+}
+.stMultiSelect [data-baseweb="tag"] button,
+div[data-baseweb="select"] [data-baseweb="tag"] button {
+    color: #FFFFFF !important;
 }
 .stButton > button,
 .stDownloadButton > button {
@@ -1341,6 +1376,10 @@ def short_label(value, max_len: int = 34) -> str:
     text = "" if pd.isna(value) else str(value)
     return text if len(text) <= max_len else text[: max_len - 3] + "..."
 
+def obs_text_html(value) -> str:
+    text = html_text(value)
+    return text.replace(" | ", "<br>")
+
 def status_pill(status: str) -> str:
     label = html_text(status or "")
     key = norm_text(label)
@@ -1398,12 +1437,16 @@ def render_native_table(
                 css.append("strong")
             if col in highlight_cols:
                 css.append("faturamento-col")
+            if "observ" in col:
+                css.append("obs-col")
             if col in money_cols:
                 content = fmt_money_html(value)
             elif col in pct_cols:
                 content = html_text(fmt_pct_display(value))
             elif col in status_cols:
                 content = status_pill(str(value))
+            elif "observ" in col:
+                content = f'<span class="obs-full">{obs_text_html(value)}</span>' if str(value or "").strip() else ""
             else:
                 max_len = 76 if "observ" in col else 42
                 title = html_text(value)
@@ -1480,30 +1523,58 @@ def render_column_settings(state_key: str, title: str, columns: list[str], label
         key=f"{state_key}_settings_visible_columns_{version}",
     )
     base["visivel"] = base["coluna"].isin(locked) | base["coluna"].isin(visible_optional)
-    order_df = base[base["visivel"]].sort_values(["ordem", "nome"]).copy()
-    edited = st.data_editor(
-        order_df,
-        hide_index=True,
-        width="stretch",
-        height=min(260, 38 + 36 * max(1, len(order_df))),
-        key=f"{state_key}_settings_column_editor_{version}",
-        disabled=["coluna", "nome", "visivel", "fixa"],
-        column_order=["nome", "ordem", "fixa", "coluna", "visivel"],
-        column_config={
-            "coluna": st.column_config.TextColumn("Campo técnico"),
-            "nome": st.column_config.TextColumn("Coluna"),
-            "visivel": st.column_config.CheckboxColumn("Visível"),
-            "ordem": st.column_config.NumberColumn("Ordem", min_value=1, step=1, format="%d"),
-            "fixa": st.column_config.TextColumn("Fixa"),
-        },
-    )
-    chosen = base.drop(columns=["ordem"], errors="ignore").merge(
-        edited[["coluna", "ordem"]],
-        on="coluna",
-        how="left",
-    )
+    ordered_df = base[base["visivel"]].sort_values(["ordem", "nome"]).copy()
+    movable_cols = [col for col in ordered_df["coluna"].tolist() if col not in locked]
+    sortable_label_to_col: dict[str, str] = {}
+    sortable_items: list[str] = []
+    for col in movable_cols:
+        label = labels.get(col, col)
+        item = label
+        if item in sortable_label_to_col:
+            item = f"{label} ({col})"
+        sortable_label_to_col[item] = col
+        sortable_items.append(item)
+
+    sorted_items = []
+    if sortable_items:
+        st.caption("Arraste as colunas abaixo para definir a ordem de exibição.")
+        sorted_items = sort_items(
+            sortable_items,
+            direction="vertical",
+            custom_style="""
+            .sortable-component {
+                border: 1px solid #C7CBD7;
+                border-radius: 8px;
+                background: #FFFFFF;
+                padding: 10px;
+            }
+            .sortable-component.vertical .sortable-item {
+                border: 1px solid #DDE1EA;
+                border-radius: 6px;
+                background: #F8FAFC;
+                color: #001945;
+                font-weight: 700;
+                text-align: left;
+                padding: 10px 12px;
+                margin-bottom: 8px;
+                cursor: grab;
+            }
+            .sortable-component.vertical .sortable-item:active {
+                cursor: grabbing;
+            }
+            """,
+            key=f"{state_key}_settings_sortable_columns_{version}",
+        )
+    else:
+        st.caption("Somente colunas fixas estão visíveis nesta configuração.")
+
+    order_cols = [col for col in columns if col in locked]
+    order_cols += [sortable_label_to_col[item] for item in sorted_items if item in sortable_label_to_col]
+    order_map = {col: idx + 1 for idx, col in enumerate(order_cols)}
+
+    chosen = base.copy()
     chosen.loc[chosen["coluna"].isin(locked), "visivel"] = True
-    chosen["ordem"] = pd.to_numeric(chosen["ordem"], errors="coerce").fillna(9999)
+    chosen["ordem"] = chosen["coluna"].map(order_map).fillna(9999)
     chosen_to_save = chosen[["coluna", "visivel", "ordem"]].copy()
     chosen_to_save["visivel"] = chosen_to_save["visivel"].astype(bool)
     chosen_to_save["ordem"] = pd.to_numeric(chosen_to_save["ordem"], errors="coerce").fillna(9999).astype(int)
@@ -1523,7 +1594,11 @@ def render_column_settings(state_key: str, title: str, columns: list[str], label
 def get_visible_kpis(state_key: str, items: list[tuple[str, str]]) -> list[str]:
     valid = [key for key, _ in items]
     saved = load_visual_preference(f"{state_key}_kpis")
-    if not saved:
+    if saved is None:
+        return valid
+    if isinstance(saved, dict):
+        saved = saved.get("visible", valid)
+    elif isinstance(saved, list) and not saved:
         return valid
     return [key for key in saved if key in valid]
 
@@ -1542,12 +1617,9 @@ def render_kpi_settings(state_key: str, title: str, items: list[tuple[str, str]]
     c1, c2 = st.columns([1, 3])
     with c1:
         if st.button("Salvar preferências de cards", type="primary", key=f"{state_key}_save_kpis"):
-            if not selected_widget:
-                st.warning("Mantenha pelo menos um card visivel.")
-            else:
-                save_visual_preference(f"{state_key}_kpis", selected_widget)
-                st.success("Preferências de cards salvas.")
-                st.rerun()
+            save_visual_preference(f"{state_key}_kpis", {"visible": selected_widget})
+            st.success("Preferências de cards salvas.")
+            st.rerun()
     with c2:
         if st.button("Restaurar cards padrão", key=f"{state_key}_reset_kpis"):
             delete_visual_preference(f"{state_key}_kpis")
@@ -1559,7 +1631,6 @@ def render_kpi_row(state_key: str, cards: list[dict]):
     visible_keys = set(get_visible_kpis(state_key, items))
     visible_cards = [card for card in cards if card["key"] in visible_keys]
     if not visible_cards:
-        st.info("Todos os cards desta visão estão ocultos. Reexiba em Configurações > Preferências de visualização.")
         return
     cols = st.columns(len(visible_cards))
     for col, card in zip(cols, visible_cards):
@@ -1781,6 +1852,8 @@ def render_consolidado_pivot_table(filtered: pd.DataFrame, fat_months: list[int]
                 content = html_text(fmt_pct_display(value))
             elif col == "status":
                 content = status_pill(str(value))
+            elif col == "observacoes_consolidadas":
+                content = f'<span class="obs-full">{obs_text_html(value)}</span>' if str(value or "").strip() else ""
             else:
                 title = html_text(value)
                 content = html_text(short_label(value, 58 if col == "observacoes_consolidadas" else 42))
