@@ -5,7 +5,6 @@ from html import escape
 import hashlib
 import io
 import json
-import sqlite3
 import pandas as pd
 import streamlit as st
 import altair as alt
@@ -25,7 +24,22 @@ from src.etl import (
 )
 
 ROOT = Path(__file__).resolve().parent
-DB_PATH = ROOT / "data" / "app.db"
+
+# Importa camada de abstração de banco (SQLite local ou PostgreSQL em cloud)
+from src.db import (
+    get_con as _db_get_con,
+    read_table as _db_read_table,
+    write_table as _db_write_table,
+    append_table as _db_append_table,
+    execute_sql as _db_execute_sql,
+    fetch_sql as _db_fetch_sql,
+    table_columns as _db_table_columns,
+    add_column as _db_add_column,
+    ensure_table as _db_ensure_table,
+    is_cloud as _db_is_cloud,
+    auto_migrate_from_sqlite as _db_auto_migrate,
+    DB_PATH,
+)
 
 st.set_page_config(
     page_title="Controle Executivo | Faturamento x Recebimento",
@@ -807,33 +821,24 @@ def render_page_header(title: str, subtitle: str = ""):
         st.markdown(f'<div class="page-subtitle">{subtitle}</div>', unsafe_allow_html=True)
 
 def get_con():
-    return sqlite3.connect(DB_PATH)
+    return _db_get_con()
 
 def init_db_if_needed():
-    if not DB_PATH.exists():
+    if not _db_is_cloud() and not DB_PATH.exists():
         from scripts.seed_database import seed_database
         seed_database()
 
 def read_table(name: str) -> pd.DataFrame:
-    con = get_con()
-    try:
-        return pd.read_sql(f"SELECT * FROM {name}", con)
-    except Exception:
-        return pd.DataFrame()
-    finally:
-        con.close()
+    return _db_read_table(name)
 
 def write_table(name: str, df: pd.DataFrame, mode: str = "replace"):
-    con = get_con()
-    df.to_sql(name, con, index=False, if_exists=mode)
-    con.close()
+    _db_write_table(name, df, mode)
 
 def append_table(name: str, df: pd.DataFrame):
-    write_table(name, df, mode="append")
+    _db_append_table(name, df)
 
 def ensure_visual_preferences_table():
-    con = get_con()
-    con.execute(
+    _db_ensure_table(
         """
         CREATE TABLE IF NOT EXISTS visual_preferences (
             pref_key TEXT PRIMARY KEY,
@@ -842,30 +847,23 @@ def ensure_visual_preferences_table():
         )
         """
     )
-    con.commit()
-    con.close()
 
 def load_visual_preference(pref_key: str):
     ensure_visual_preferences_table()
-    con = get_con()
     try:
-        row = pd.read_sql(
+        row = _db_fetch_sql(
             "SELECT payload FROM visual_preferences WHERE pref_key = ?",
-            con,
-            params=(pref_key,),
+            (pref_key,),
         )
         if row.empty:
             return None
         return json.loads(str(row["payload"].iloc[0] or "null"))
     except Exception:
         return None
-    finally:
-        con.close()
 
 def save_visual_preference(pref_key: str, payload):
     ensure_visual_preferences_table()
-    con = get_con()
-    con.execute(
+    _db_execute_sql(
         """
         INSERT INTO visual_preferences (pref_key, payload, updated_at)
         VALUES (?, ?, ?)
@@ -879,19 +877,13 @@ def save_visual_preference(pref_key: str, payload):
             datetime.now().strftime("%d/%m/%Y %H:%M"),
         ),
     )
-    con.commit()
-    con.close()
 
 def delete_visual_preference(pref_key: str):
     ensure_visual_preferences_table()
-    con = get_con()
-    con.execute("DELETE FROM visual_preferences WHERE pref_key = ?", (pref_key,))
-    con.commit()
-    con.close()
+    _db_execute_sql("DELETE FROM visual_preferences WHERE pref_key = ?", (pref_key,))
 
 def ensure_base_dinamica_table():
-    con = get_con()
-    con.execute(
+    _db_ensure_table(
         """
         CREATE TABLE IF NOT EXISTS base_dinamica (
             linha_origem INTEGER,
@@ -913,7 +905,7 @@ def ensure_base_dinamica_table():
         )
         """
     )
-    cols = {row[1] for row in con.execute("PRAGMA table_info(base_dinamica)").fetchall()}
+    cols = _db_table_columns("base_dinamica")
     type_hint = {
         "linha_origem": "INTEGER",
         "faturado_marco": "REAL",
@@ -927,9 +919,7 @@ def ensure_base_dinamica_table():
     }
     for col in DINAMICA_COLUMNS:
         if col not in cols:
-            con.execute(f"ALTER TABLE base_dinamica ADD COLUMN {col} {type_hint.get(col, 'TEXT')}")
-    con.commit()
-    con.close()
+            _db_add_column("base_dinamica", col, type_hint.get(col, "TEXT"))
 
 def normalize_base_dinamica(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy() if df is not None else pd.DataFrame(columns=DINAMICA_COLUMNS)
@@ -1048,8 +1038,7 @@ def load_operational_tables(year: int = 2026) -> tuple[pd.DataFrame, pd.DataFram
     return fat_generated, cont_generated, base
 
 def ensure_importacoes_table():
-    con = get_con()
-    con.execute(
+    _db_ensure_table(
         """
         CREATE TABLE IF NOT EXISTS importacoes (
             data_hora TEXT,
@@ -1064,8 +1053,6 @@ def ensure_importacoes_table():
         )
         """
     )
-    con.commit()
-    con.close()
 
 def register_importacao(
     tipo_arquivo: str,
@@ -1092,8 +1079,7 @@ def register_importacao(
     append_table("importacoes", row)
 
 def ensure_exportacoes_table():
-    con = get_con()
-    con.execute(
+    _db_ensure_table(
         """
         CREATE TABLE IF NOT EXISTS exportacoes (
             exportacao_id TEXT,
@@ -1110,25 +1096,28 @@ def ensure_exportacoes_table():
         )
         """
     )
-    cols = {row[1] for row in con.execute("PRAGMA table_info(exportacoes)").fetchall()}
+    cols = _db_table_columns("exportacoes")
     if "exportacao_id" not in cols:
-        con.execute("ALTER TABLE exportacoes ADD COLUMN exportacao_id TEXT")
+        _db_add_column("exportacoes", "exportacao_id", "TEXT")
     if "observacao_manual" not in cols:
-        con.execute("ALTER TABLE exportacoes ADD COLUMN observacao_manual TEXT")
+        _db_add_column("exportacoes", "observacao_manual", "TEXT")
 
-    rows = con.execute(
-        """
-        SELECT rowid, data_hora, tipo_relatorio, formato, nome_arquivo, periodo, exportacao_id
-        FROM exportacoes
-        """
-    ).fetchall()
-    for rowid, data_hora, tipo, formato, nome, periodo, exportacao_id in rows:
-        if not str(exportacao_id or "").strip():
-            source = f"{rowid}|{data_hora}|{tipo}|{formato}|{nome}|{periodo}"
-            new_id = hashlib.sha1(source.encode("utf-8")).hexdigest()[:16]
-            con.execute("UPDATE exportacoes SET exportacao_id = ? WHERE rowid = ?", (new_id, rowid))
-    con.commit()
-    con.close()
+    # Preencher exportacao_id para linhas que não têm
+    try:
+        rows_df = _db_fetch_sql(
+            "SELECT data_hora, tipo_relatorio, formato, nome_arquivo, periodo, exportacao_id FROM exportacoes"
+        )
+        if not rows_df.empty:
+            needs_update = rows_df[rows_df["exportacao_id"].fillna("").str.strip() == ""]
+            for idx, row in needs_update.iterrows():
+                source = f"{idx}|{row['data_hora']}|{row['tipo_relatorio']}|{row['formato']}|{row['nome_arquivo']}|{row['periodo']}"
+                new_id = hashlib.sha1(source.encode("utf-8")).hexdigest()[:16]
+                _db_execute_sql(
+                    "UPDATE exportacoes SET exportacao_id = ? WHERE data_hora = ? AND nome_arquivo = ? AND (exportacao_id IS NULL OR exportacao_id = '')",
+                    (new_id, row["data_hora"], row["nome_arquivo"]),
+                )
+    except Exception:
+        pass
 
 def register_exportacao(
     tipo_relatorio: str,
@@ -1158,8 +1147,7 @@ def register_exportacao(
     append_table("exportacoes", row)
 
 def ensure_inconsistencias_table():
-    con = get_con()
-    con.execute(
+    _db_ensure_table(
         """
         CREATE TABLE IF NOT EXISTS inconsistencias_manuais (
             inconsistencia_id TEXT,
@@ -1174,16 +1162,13 @@ def ensure_inconsistencias_table():
         )
         """
     )
-    con.commit()
-    con.close()
 
 def file_already_imported(file_hash: str, tipo_arquivo: str) -> bool:
     if not file_hash:
         return False
     ensure_importacoes_table()
-    con = get_con()
     try:
-        result = pd.read_sql(
+        result = _db_fetch_sql(
             """
             SELECT COUNT(*) AS n
             FROM importacoes
@@ -1191,12 +1176,11 @@ def file_already_imported(file_hash: str, tipo_arquivo: str) -> bool:
               AND tipo_arquivo = ?
               AND status IN ('Importado com sucesso', 'Importado com avisos', 'Base inicial')
             """,
-            con,
-            params=(file_hash, tipo_arquivo),
+            (file_hash, tipo_arquivo),
         )
         return int(result["n"].iloc[0]) > 0
-    finally:
-        con.close()
+    except Exception:
+        return False
 
 def hash_local_file_if_exists(filename: str) -> str:
     path = ROOT / "data" / "raw" / str(filename)
@@ -3065,8 +3049,7 @@ def render_dashboard_executivo(consolidado: pd.DataFrame, rec_months: list[int],
         )
 
 def ensure_comentarios_table():
-    con = get_con()
-    con.execute(
+    _db_ensure_table(
         """
         CREATE TABLE IF NOT EXISTS comentarios_manuais (
             unidade_padrao TEXT,
@@ -3079,8 +3062,6 @@ def ensure_comentarios_table():
         )
         """
     )
-    con.commit()
-    con.close()
 
 def render_consolidado_analitico(consolidado: pd.DataFrame, fat_months: list[int], rec_months: list[int]):
     render_page_header("Consolidado", "Consulta analítica de faturamento e recebimentos por unidade, operadora e mês.")
@@ -3713,6 +3694,7 @@ def render_exportacoes(
         st.markdown("</div>", unsafe_allow_html=True)
 
 init_db_if_needed()
+_db_auto_migrate()  # No primeiro deploy cloud, migra SQLite → PostgreSQL
 ensure_base_dinamica_table()
 ensure_importacoes_table()
 ensure_exportacoes_table()

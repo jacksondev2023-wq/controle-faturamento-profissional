@@ -12,3 +12,4 @@ data/backups/
 data/qa_screenshots/
 data/processed/
 data/raw/
+.streamlit/secrets.toml
