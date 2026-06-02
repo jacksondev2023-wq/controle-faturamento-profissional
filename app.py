@@ -616,6 +616,64 @@ section[data-testid="stSidebar"] [data-testid="stExpander"] p {
 .pivot-table td:not(:first-child):not(:nth-child(2)):not(.obs-col) {
     min-width: 142px;
 }
+.sheet-pivot-wrap {
+    max-height: none;
+}
+.sheet-pivot {
+    width: 100%;
+    min-width: 1180px;
+    table-layout: fixed;
+}
+.sheet-pivot th,
+.sheet-pivot td {
+    padding: 4px 6px;
+    font-size: 0.86rem;
+    line-height: 1.2;
+}
+.sheet-pivot th:first-child,
+.sheet-pivot td:first-child {
+    width: 255px;
+}
+.sheet-pivot th.sheet-money-col,
+.sheet-pivot td.sheet-money-col {
+    width: 134px;
+}
+.sheet-pivot th.sheet-fat-col {
+    background: #FFC000 !important;
+    color: #000000 !important;
+    text-align: center;
+}
+.sheet-pivot th.sheet-obs-col {
+    background: #244392 !important;
+    color: #FFFFFF !important;
+    text-align: center;
+}
+.sheet-pivot td.sheet-obs-col {
+    width: 390px;
+    background: #FFF2CC !important;
+    color: #000000;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: normal;
+    vertical-align: top;
+}
+.sheet-pivot td.fat-month-4 {
+    background: #D9D9D9 !important;
+}
+.sheet-pivot tr.unit-total-row td {
+    background: #DDEBF7 !important;
+    color: #001945;
+    border-top: 2px solid #2F75B5;
+    border-bottom: 1px solid #2F75B5;
+    font-weight: 900;
+}
+.sheet-pivot tr.detail-row td {
+    border-bottom: 1px solid #2FA8E1;
+}
+.sheet-pivot tr.detail-row td:first-child {
+    color: #001945;
+    font-weight: 500;
+}
 .column-config-panel {
     border: 1px solid var(--line);
     border-radius: 8px;
@@ -842,7 +900,7 @@ def render_global_parameters():
         rec_months = st.multiselect(
             "Mês(es) de recebimento",
             options=list(MONTHS.keys()),
-            default=[4, 5],
+            default=[3, 4, 5],
             format_func=lambda x: MONTHS[x],
         )
     return int(year), fat_months, rec_months
@@ -1729,14 +1787,15 @@ def merge_base_dinamica_observations(consolidado: pd.DataFrame, base_dinamica: p
     if consolidado.empty or base_dinamica is None or base_dinamica.empty or "observacao" not in base_dinamica:
         return consolidado
     base = normalize_base_dinamica(base_dinamica)
-    base = base[base["observacao"].fillna("").astype(str).str.strip() != ""].copy()
     if base.empty:
         return consolidado
     grouped = (
-        base.groupby(["unidade_padrao", "operadora_padrao"], dropna=False)["observacao"]
-        .apply(lambda values: " | ".join(dict.fromkeys(str(v).strip() for v in values if str(v).strip())))
+        base.groupby(["unidade_padrao", "operadora_padrao"], dropna=False)
+        .agg(
+            observacao_dinamica=("observacao", lambda values: " | ".join(dict.fromkeys(str(v).strip() for v in values if str(v).strip()))),
+            ordem_base_dinamica=("linha_origem", "min"),
+        )
         .reset_index()
-        .rename(columns={"observacao": "observacao_dinamica"})
     )
     out = consolidado.merge(grouped, on=["unidade_padrao", "operadora_padrao"], how="left")
     if "observacao_fiscal" not in out:
@@ -1902,6 +1961,108 @@ def render_consolidado_pivot_table(filtered: pd.DataFrame, fat_months: list[int]
         f"""
         <div class="native-table-wrap pivot-table-wrap">
             <table class="native-table pivot-table">
+                <thead><tr>{head}</tr></thead>
+                <tbody>{''.join(body)}</tbody>
+            </table>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+def render_consolidado_sheet_table(filtered: pd.DataFrame, fat_months: list[int], rec_months: list[int]):
+    fat_cols = [f"fat_{month}" for month in fat_months if f"fat_{month}" in filtered]
+    rec_cols = [f"rec_bruto_{month}" for month in rec_months if f"rec_bruto_{month}" in filtered]
+    table_cols = ["linha_label", *fat_cols, *rec_cols, "observacoes_consolidadas"]
+    money_cols = set(fat_cols + rec_cols)
+
+    labels = {
+        "linha_label": "Unidade / Operadora",
+        "observacoes_consolidadas": "Observação",
+    }
+    for month in fat_months:
+        col = f"fat_{month}"
+        if col in table_cols:
+            labels[col] = f"Faturado {MONTHS.get(month, month)}"
+    for month in rec_months:
+        col = f"rec_bruto_{month}"
+        if col in table_cols:
+            labels[col] = f"Rec. Bruto {MONTHS.get(month, month)}"
+
+    def money_or_blank_html(value) -> str:
+        try:
+            if abs(float(value or 0)) < 0.005:
+                return ""
+        except Exception:
+            return ""
+        return fmt_money_html(value)
+
+    def unit_total_row(group: pd.DataFrame, unidade: str) -> dict:
+        row = {"linha_label": unidade, "observacoes_consolidadas": ""}
+        for col in money_cols:
+            row[col] = pd.to_numeric(group[col], errors="coerce").fillna(0).sum()
+        return row
+
+    work = filtered.copy()
+    if "ordem_base_dinamica" not in work:
+        work["ordem_base_dinamica"] = range(1, len(work) + 1)
+    work["ordem_base_dinamica"] = pd.to_numeric(work["ordem_base_dinamica"], errors="coerce").fillna(999999)
+
+    unit_order = (
+        work.groupby("unidade_padrao", dropna=False)["ordem_base_dinamica"]
+        .min()
+        .sort_values()
+        .index
+        .tolist()
+    )
+
+    rows: list[tuple[str, dict]] = []
+    for unidade in unit_order:
+        group = work[work["unidade_padrao"].astype(str) == str(unidade)].copy()
+        rows.append(("unit-total-row", unit_total_row(group, str(unidade))))
+        details = group.sort_values(["ordem_base_dinamica", "operadora_padrao"], ascending=[True, True])
+        for _, detail in details.iterrows():
+            row = {"linha_label": str(detail.get("operadora_padrao", ""))}
+            for col in money_cols:
+                row[col] = detail.get(col, "")
+            row["observacoes_consolidadas"] = str(detail.get("observacoes_consolidadas", "") or "").strip()
+            rows.append(("detail-row", row))
+
+    def column_css(col: str) -> str:
+        classes = []
+        if col.startswith("fat_"):
+            classes += ["sheet-money-col", "sheet-fat-col", f"fat-month-{col.split('_')[-1]}"]
+        elif col.startswith("rec_bruto_"):
+            classes.append("sheet-money-col")
+        if col == "observacoes_consolidadas":
+            classes.append("sheet-obs-col")
+        return " ".join(classes)
+
+    head = "".join(f'<th class="{column_css(col)}">{html_text(labels.get(col, col))}</th>' for col in table_cols)
+    body = []
+    for row_class, row in rows:
+        cells = []
+        for col in table_cols:
+            value = row.get(col, "")
+            classes = [column_css(col)]
+            if col in money_cols:
+                classes.append("num")
+                content = money_or_blank_html(value)
+            elif col == "observacoes_consolidadas":
+                content = f'<span class="obs-full">{obs_text_html(value)}</span>' if str(value or "").strip() else ""
+            else:
+                title = html_text(value)
+                content = html_text(short_label(value, 46))
+                if title:
+                    content = f'<span title="{title}">{content}</span>'
+            if row_class == "unit-total-row":
+                classes.append("strong")
+            cells.append(f'<td class="{" ".join(c for c in classes if c)}">{content}</td>')
+        body.append(f'<tr class="{row_class}">{"".join(cells)}</tr>')
+
+    st.markdown(
+        f"""
+        <div class="native-table-wrap pivot-table-wrap sheet-pivot-wrap">
+            <table class="native-table pivot-table sheet-pivot">
                 <thead><tr>{head}</tr></thead>
                 <tbody>{''.join(body)}</tbody>
             </table>
@@ -3266,7 +3427,7 @@ def render_consolidado_analitico(consolidado: pd.DataFrame, fat_months: list[int
     ])
 
     st.markdown('<div class="section-title">Consolidado por Unidade e Operadora</div>', unsafe_allow_html=True)
-    render_consolidado_pivot_table(filtered, fat_months, rec_months)
+    render_consolidado_sheet_table(filtered, fat_months, rec_months)
     st.caption(f"Mostrando {len(filtered)} linhas analíticas, agrupadas por {filtered['unidade_padrao'].nunique()} unidades. Última sincronização: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
 
 def build_comentarios_grid(consolidado: pd.DataFrame, comentarios: pd.DataFrame, mes_referencia: int, ano_referencia: int) -> pd.DataFrame:

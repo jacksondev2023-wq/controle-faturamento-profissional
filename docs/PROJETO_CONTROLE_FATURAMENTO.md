@@ -72,14 +72,18 @@ Validacao aplicada:
 
 - 120 pares de unidade/operadora importados da planilha para `base_dinamica`.
 - A base anterior foi substituida; nomes de unidades, operadoras, valores e observacoes seguem a aba `DINAMICA`.
-- `faturado_marco`: R$ 2.245.027,70.
+- A coluna `rec_bruto_marco` e `rec_liquido_marco` foi preservada do backup anterior quando a aba `DINAMICA` veio vazia para esse mes, para manter a apresentacao com `Rec. Bruto Mar`.
+- Ajuste manual aplicado a partir do print enviado: `ALIANCA HOME CARE - RN` / `PROCESSO JUDICIALIZADO` / `faturado_marco = R$ 575.658,71`, pois essa celula nao estava salva no arquivo local.
+- `faturado_marco`: R$ 2.820.686,41.
 - `faturado_abril`: R$ 19.791.682,33.
+- `rec_bruto_marco`: R$ 13.467.749,40.
+- `rec_liquido_marco`: R$ 12.460.155,46.
 - `rec_bruto_abril`: R$ 20.914.898,01.
 - `rec_liquido_abril`: R$ 20.013.112,58.
 - `rec_bruto_maio`: R$ 15.454.014,26.
 - `rec_liquido_maio`: R$ 14.349.406,00.
 - 32 observacoes da planilha confirmadas na base.
-- O padrao visual usa faturamento Marco/Abril e recebimentos Abril/Maio. Recebimento de marco nao aparece por padrao porque a aba `DINAMICA` atual nao possui valores recebidos nesse mes.
+- Quando a planilha for salva com esse valor, o ajuste manual pode ser removido e substituido pela importacao direta da aba `DINAMICA`.
 
 O marcador `metadata.base_seed_version` controla a sincronizacao da base operacional com o PostgreSQL no deploy.
 
@@ -126,12 +130,12 @@ Colunas da tabela detalhada tambem podem ser ocultadas, reexibidas e reordenadas
 
 Tela de apresentacao analitica por unidade e operadora. A tabela funciona como uma visao dinamica:
 
-- subtotal por unidade;
-- detalhe por operadora;
-- observacoes fiscais/manuais em linhas de detalhe abaixo da respectiva operadora, com prefixo do nome da operadora e sem coluna horizontal de observacoes;
-- subtotal por unidade apenas com valores financeiros; nao exibir resumo/total de observacoes abaixo da unidade;
-- destaque visual nas colunas de faturamento;
-- rolagem horizontal controlada para muitas colunas.
+- visual inicial no formato de planilha: `Unidade / Operadora`, `Faturado Mar`, `Faturado Abr`, `Rec. Bruto Mar`, `Rec. Bruto Abr`, `Rec. Bruto Mai`, `Observacao`;
+- subtotal por unidade apenas com valores financeiros;
+- detalhe por operadora na mesma coluna `Unidade / Operadora`;
+- observacoes fiscais/manuais na ultima coluna da propria linha da operadora, com fundo amarelo claro;
+- nao exibir linhas extras de resumo/total de observacoes abaixo da unidade;
+- preservar a ordem das unidades e operadoras conforme a aba `DINAMICA`.
 
 Cards e colunas sao configurados em:
 
