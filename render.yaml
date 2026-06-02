@@ -1,0 +1,8 @@
+services:
+  - type: web
+    name: controle-faturamento-profissional
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run app.py --server.address 0.0.0.0 --server.port $PORT
+    plan: free
+    autoDeploy: true

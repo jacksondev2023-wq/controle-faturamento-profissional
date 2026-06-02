@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+data/*streamlit*.log
+data/*.png
+data/*.jpg
+data/*.jpeg
+data/*.log
+data/app_backup_*.db
+data/backups/
+data/qa_screenshots/
+data/processed/
+data/raw/
