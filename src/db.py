@@ -351,6 +351,8 @@ def add_column(table_name: str, col_name: str, col_type: str = "TEXT") -> None:
     finally:
         con.close()
 
+_ensured_tables: set[str] = set()  # cache para evitar chamadas repetidas
+
 
 def ensure_table(create_sql: str) -> None:
     """Execute ``CREATE TABLE IF NOT EXISTS ...`` with automatic type conversion.
@@ -358,11 +360,16 @@ def ensure_table(create_sql: str) -> None:
     Accepts SQLite-style DDL and converts types (e.g. ``REAL`` →
     ``DOUBLE PRECISION``) when running against PostgreSQL.
 
-    Parameters
-    ----------
-    create_sql : str
-        Instrução ``CREATE TABLE IF NOT EXISTS ...`` no dialeto SQLite.
+    Usa cache interno para evitar executar DDL repetido a cada rerun.
     """
+    # Extrai nome da tabela para usar como chave de cache
+    import re as _re
+    match = _re.search(r"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+(\w+)", create_sql, _re.IGNORECASE)
+    table_key = match.group(1) if match else create_sql[:60]
+
+    if table_key in _ensured_tables:
+        return  # já garantida nesta sessão
+
     converted = _convert_ddl_types(create_sql)
     logger.info("ensure_table: %s", converted[:120])
 
@@ -371,6 +378,7 @@ def ensure_table(create_sql: str) -> None:
         cur = con.cursor()
         cur.execute(converted)
         con.commit()
+        _ensured_tables.add(table_key)
     except Exception:
         try:
             con.rollback()

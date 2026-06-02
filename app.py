@@ -847,6 +847,13 @@ def ensure_visual_preferences_table():
         )
         """
     )
+    # Garante índice único (necessário caso a tabela tenha sido criada pelo to_sql sem PK)
+    try:
+        _db_execute_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_visual_pref_key ON visual_preferences(pref_key)"
+        )
+    except Exception:
+        pass
 
 def load_visual_preference(pref_key: str):
     ensure_visual_preferences_table()
@@ -863,14 +870,10 @@ def load_visual_preference(pref_key: str):
 
 def save_visual_preference(pref_key: str, payload):
     ensure_visual_preferences_table()
+    # DELETE + INSERT — funciona em ambos SQLite e PostgreSQL sem exigir PK/UNIQUE
+    _db_execute_sql("DELETE FROM visual_preferences WHERE pref_key = ?", (pref_key,))
     _db_execute_sql(
-        """
-        INSERT INTO visual_preferences (pref_key, payload, updated_at)
-        VALUES (?, ?, ?)
-        ON CONFLICT(pref_key) DO UPDATE SET
-            payload = excluded.payload,
-            updated_at = excluded.updated_at
-        """,
+        "INSERT INTO visual_preferences (pref_key, payload, updated_at) VALUES (?, ?, ?)",
         (
             pref_key,
             json.dumps(payload, ensure_ascii=False),
