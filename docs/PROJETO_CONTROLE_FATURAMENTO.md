@@ -149,7 +149,7 @@ Central tecnica do sistema:
 
 As abas de apresentacao nao exibem controles de configuracao. A configuracao fica separada em `Configuracoes`.
 
-Atualmente as preferencias ficam na sessao do usuario no Streamlit:
+As preferencias ficam registradas na tabela SQLite `visual_preferences`:
 
 - ocultar/reexibir cards;
 - ocultar/reexibir colunas;
@@ -157,6 +157,10 @@ Atualmente as preferencias ficam na sessao do usuario no Streamlit:
 - restaurar padrao.
 
 Colunas `Unidade` e `Operadora` ficam sempre visiveis para preservar leitura executiva.
+
+Na tela `Configuracoes`, o usuario precisa clicar em `Salvar preferencias de cards` ou `Salvar preferencias de colunas` para aplicar a configuracao nas abas principais.
+
+Observacao sobre deploy gratuito: no Streamlit Community Cloud, alteracoes em SQLite local funcionam durante a vida da instancia, mas podem ser perdidas em reinicios/redeploys. Para persistencia definitiva entre usuarios e reinicios, migrar `visual_preferences`, comentarios e base operacional para um banco externo, como PostgreSQL/Supabase/Neon.
 
 ## Cuidados Com Dados Sensíveis
 

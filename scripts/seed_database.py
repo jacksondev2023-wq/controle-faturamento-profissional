@@ -99,6 +99,11 @@ def seed_database():
         "comentario_manual", "atualizado_por", "atualizado_em"
     ]).to_sql("comentarios_manuais", con, index=False, if_exists="replace")
 
+    # Preferencias visuais persistidas para cards e colunas do Dashboard/Consolidado.
+    pd.DataFrame(columns=[
+        "pref_key", "payload", "updated_at"
+    ]).to_sql("visual_preferences", con, index=False, if_exists="replace")
+
     # Metadados do projeto.
     pd.DataFrame([
         {"chave": "projeto", "valor": "Controle Faturamento x Recebimento"},

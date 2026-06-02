@@ -4,6 +4,7 @@ from datetime import datetime
 from html import escape
 import hashlib
 import io
+import json
 import sqlite3
 import pandas as pd
 import streamlit as st
@@ -830,6 +831,64 @@ def write_table(name: str, df: pd.DataFrame, mode: str = "replace"):
 def append_table(name: str, df: pd.DataFrame):
     write_table(name, df, mode="append")
 
+def ensure_visual_preferences_table():
+    con = get_con()
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS visual_preferences (
+            pref_key TEXT PRIMARY KEY,
+            payload TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+    con.commit()
+    con.close()
+
+def load_visual_preference(pref_key: str):
+    ensure_visual_preferences_table()
+    con = get_con()
+    try:
+        row = pd.read_sql(
+            "SELECT payload FROM visual_preferences WHERE pref_key = ?",
+            con,
+            params=(pref_key,),
+        )
+        if row.empty:
+            return None
+        return json.loads(str(row["payload"].iloc[0] or "null"))
+    except Exception:
+        return None
+    finally:
+        con.close()
+
+def save_visual_preference(pref_key: str, payload):
+    ensure_visual_preferences_table()
+    con = get_con()
+    con.execute(
+        """
+        INSERT INTO visual_preferences (pref_key, payload, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(pref_key) DO UPDATE SET
+            payload = excluded.payload,
+            updated_at = excluded.updated_at
+        """,
+        (
+            pref_key,
+            json.dumps(payload, ensure_ascii=False),
+            datetime.now().strftime("%d/%m/%Y %H:%M"),
+        ),
+    )
+    con.commit()
+    con.close()
+
+def delete_visual_preference(pref_key: str):
+    ensure_visual_preferences_table()
+    con = get_con()
+    con.execute("DELETE FROM visual_preferences WHERE pref_key = ?", (pref_key,))
+    con.commit()
+    con.close()
+
 def ensure_base_dinamica_table():
     con = get_con()
     con.execute(
@@ -1335,7 +1394,6 @@ def render_native_table(
 
 def build_column_config(state_key: str, columns: list[str], labels: dict[str, str], locked: set[str] | None = None) -> pd.DataFrame:
     locked = locked or set()
-    config_key = f"{state_key}_column_config"
     base = pd.DataFrame([
         {
             "coluna": col,
@@ -1347,8 +1405,9 @@ def build_column_config(state_key: str, columns: list[str], labels: dict[str, st
         for idx, col in enumerate(columns)
     ])
 
-    saved = st.session_state.get(config_key)
-    if isinstance(saved, pd.DataFrame) and not saved.empty:
+    saved_payload = load_visual_preference(f"{state_key}_columns")
+    saved = pd.DataFrame(saved_payload) if isinstance(saved_payload, list) else pd.DataFrame()
+    if not saved.empty and {"coluna", "visivel", "ordem"}.issubset(saved.columns):
         base = base.merge(
             saved[["coluna", "visivel", "ordem"]].rename(columns={"visivel": "visivel_salva", "ordem": "ordem_salva"}),
             on="coluna",
@@ -1371,7 +1430,6 @@ def configure_columns(state_key: str, columns: list[str], labels: dict[str, str]
 
 def render_column_settings(state_key: str, title: str, columns: list[str], labels: dict[str, str], locked: set[str] | None = None):
     locked = locked or set()
-    config_key = f"{state_key}_column_config"
     version_key = f"{state_key}_column_config_version"
     version = int(st.session_state.get(version_key, 0))
     base = build_column_config(state_key, columns, labels, locked)
@@ -1412,34 +1470,52 @@ def render_column_settings(state_key: str, title: str, columns: list[str], label
     )
     chosen.loc[chosen["coluna"].isin(locked), "visivel"] = True
     chosen["ordem"] = pd.to_numeric(chosen["ordem"], errors="coerce").fillna(9999)
-    st.session_state[config_key] = chosen.copy()
+    chosen_to_save = chosen[["coluna", "visivel", "ordem"]].copy()
+    chosen_to_save["visivel"] = chosen_to_save["visivel"].astype(bool)
+    chosen_to_save["ordem"] = pd.to_numeric(chosen_to_save["ordem"], errors="coerce").fillna(9999).astype(int)
 
-    if st.button("Restaurar colunas padrão", key=f"{state_key}_reset_columns"):
-        st.session_state.pop(config_key, None)
-        st.session_state[version_key] = version + 1
-        st.rerun()
+    c1, c2 = st.columns([1, 3])
+    with c1:
+        if st.button("Salvar preferências de colunas", type="primary", key=f"{state_key}_save_columns"):
+            save_visual_preference(f"{state_key}_columns", chosen_to_save.to_dict("records"))
+            st.success("Preferências de colunas salvas.")
+            st.rerun()
+    with c2:
+        if st.button("Restaurar colunas padrão", key=f"{state_key}_reset_columns"):
+            delete_visual_preference(f"{state_key}_columns")
+            st.session_state[version_key] = version + 1
+            st.rerun()
 
 def get_visible_kpis(state_key: str, items: list[tuple[str, str]]) -> list[str]:
     valid = [key for key, _ in items]
-    saved = st.session_state.get(f"{state_key}_visible_kpis")
+    saved = load_visual_preference(f"{state_key}_kpis")
     if not saved:
         return valid
     return [key for key in saved if key in valid]
 
 def render_kpi_settings(state_key: str, title: str, items: list[tuple[str, str]]):
-    key = f"{state_key}_visible_kpis"
+    version_key = f"{state_key}_kpi_config_version"
+    version = int(st.session_state.get(version_key, 0))
     selected = get_visible_kpis(state_key, items)
     st.markdown(f"### {title}")
-    st.multiselect(
+    selected_widget = st.multiselect(
         "Cards visíveis",
         options=[item_key for item_key, _ in items],
         default=selected,
         format_func=lambda item_key: dict(items).get(item_key, item_key),
-        key=key,
+        key=f"{state_key}_settings_kpis_{version}",
     )
-    if st.button("Restaurar cards padrão", key=f"{state_key}_reset_kpis"):
-        st.session_state.pop(key, None)
-        st.rerun()
+    c1, c2 = st.columns([1, 3])
+    with c1:
+        if st.button("Salvar preferências de cards", type="primary", key=f"{state_key}_save_kpis"):
+            save_visual_preference(f"{state_key}_kpis", selected_widget)
+            st.success("Preferências de cards salvas.")
+            st.rerun()
+    with c2:
+        if st.button("Restaurar cards padrão", key=f"{state_key}_reset_kpis"):
+            delete_visual_preference(f"{state_key}_kpis")
+            st.session_state[version_key] = version + 1
+            st.rerun()
 
 def render_kpi_row(state_key: str, cards: list[dict]):
     items = [(card["key"], card["label"]) for card in cards]
