@@ -561,6 +561,28 @@ section[data-testid="stSidebar"] [data-testid="stExpander"] p {
 .native-table tr.detail-row td:first-child {
     color: #697080;
 }
+.native-table tr.obs-note-row td {
+    background: #FFFFFF;
+    color: #172033;
+    padding: 10px 14px 16px 14px;
+    border-bottom: 1px solid #DDE1EA;
+    white-space: normal;
+    line-height: 1.45;
+}
+.native-table tr.unit-total-note-row td {
+    background: #EEF2F8 !important;
+    color: #001945;
+    font-weight: 800;
+}
+.obs-note-label {
+    display: block;
+    color: #5F6472;
+    font-size: 0.72rem;
+    font-weight: 800;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+}
 .native-table tr.grand-total-row td {
     background: #D9DCE5 !important;
     color: #001945;
@@ -591,7 +613,7 @@ section[data-testid="stSidebar"] [data-testid="stExpander"] p {
 }
 .pivot-table th:not(:first-child):not(:nth-child(2)):not(.obs-col),
 .pivot-table td:not(:first-child):not(:nth-child(2)):not(.obs-col) {
-    min-width: 158px;
+    min-width: 142px;
 }
 .column-config-panel {
     border: 1px solid var(--line);
@@ -1723,7 +1745,7 @@ def merge_base_dinamica_observations(consolidado: pd.DataFrame, base_dinamica: p
     return out.drop(columns=["observacao_dinamica"])
 
 def consolidado_pivot_column_spec(filtered: pd.DataFrame, fat_months: list[int], rec_months: list[int]) -> tuple[list[str], dict[str, str], set[str], set[str]]:
-    display_cols = ["unidade_padrao", "operadora_padrao", "observacoes_consolidadas"]
+    display_cols = ["unidade_padrao", "operadora_padrao"]
     for month in fat_months:
         col = f"fat_{month}"
         if col in filtered:
@@ -1780,12 +1802,14 @@ def render_consolidado_pivot_table(filtered: pd.DataFrame, fat_months: list[int]
         labels,
         locked={"unidade_padrao", "operadora_padrao"},
     )
+    table_cols = [col for col in display_cols if col != "observacoes_consolidadas"]
+    col_span = max(1, len(table_cols))
 
     def aggregate_row(group: pd.DataFrame, unidade: str, operadora: str, status: str, obs: str) -> dict:
         row = {}
         total_fat = float(pd.to_numeric(group.get("faturado", 0), errors="coerce").fillna(0).sum()) if "faturado" in group else 0
         total_rec = float(pd.to_numeric(group.get("total_recebido_bruto", 0), errors="coerce").fillna(0).sum()) if "total_recebido_bruto" in group else 0
-        for col in display_cols:
+        for col in table_cols:
             if col == "unidade_padrao":
                 row[col] = unidade
             elif col == "operadora_padrao":
@@ -1802,20 +1826,24 @@ def render_consolidado_pivot_table(filtered: pd.DataFrame, fat_months: list[int]
                 row[col] = ""
         return row
 
-    rows: list[tuple[str, dict]] = []
+    rows: list[tuple[str, dict, str]] = []
     sort_cols = ["unidade_padrao", "diferenca_pendente"] if "diferenca_pendente" in filtered else ["unidade_padrao"]
     filtered_sorted = filtered.sort_values(sort_cols, ascending=[True, False] if len(sort_cols) == 2 else True).copy()
     for unidade, group in filtered_sorted.groupby("unidade_padrao", dropna=False, sort=True):
         obs_count = int(group["observacoes_consolidadas"].fillna("").astype(str).str.strip().ne("").sum()) if "observacoes_consolidadas" in group else 0
-        subtotal_obs = f"{obs_count} observações na unidade" if obs_count else ""
+        subtotal_obs = ""
+        if obs_count:
+            obs_label = "observação" if obs_count == 1 else "observações"
+            subtotal_obs = f"{obs_count} {obs_label} na unidade"
         rows.append((
             "unit-total-row",
             aggregate_row(group, str(unidade), f"Total da unidade ({group['operadora_padrao'].nunique()} operadoras)", "Subtotal", subtotal_obs),
+            subtotal_obs,
         ))
         details = group.sort_values("diferenca_pendente", ascending=False) if "diferenca_pendente" in group else group
         for _, detail in details.iterrows():
             detail_row = {}
-            for col in display_cols:
+            for col in table_cols:
                 if col == "unidade_padrao":
                     detail_row[col] = ""
                 elif col == "operadora_padrao":
@@ -1824,8 +1852,9 @@ def render_consolidado_pivot_table(filtered: pd.DataFrame, fat_months: list[int]
                     detail_row[col] = float(detail.get(col, 0) or 0) * 100
                 else:
                     detail_row[col] = detail.get(col, "")
-            rows.append(("detail-row", detail_row))
-    rows.append(("grand-total-row", aggregate_row(filtered, "TOTAL GERAL", "", "Total", "")))
+            note = str(detail.get("observacoes_consolidadas", "") or "").strip()
+            rows.append(("detail-row", detail_row, note))
+    rows.append(("grand-total-row", aggregate_row(filtered, "TOTAL GERAL", "", "Total", ""), ""))
 
     def column_css(col: str) -> str:
         classes = []
@@ -1835,11 +1864,11 @@ def render_consolidado_pivot_table(filtered: pd.DataFrame, fat_months: list[int]
             classes.append("obs-col")
         return " ".join(classes)
 
-    head = "".join(f'<th class="{column_css(col)}">{html_text(labels.get(col, col))}</th>' for col in display_cols)
+    head = "".join(f'<th class="{column_css(col)}">{html_text(labels.get(col, col))}</th>' for col in table_cols)
     body = []
-    for row_class, row in rows:
+    for row_class, row, note in rows:
         cells = []
-        for col in display_cols:
+        for col in table_cols:
             value = row.get(col, "")
             classes = [column_css(col)]
             if col in money_cols or col == "perc_recebido_total":
@@ -1861,6 +1890,15 @@ def render_consolidado_pivot_table(filtered: pd.DataFrame, fat_months: list[int]
                     content = f'<span title="{title}">{content}</span>'
             cells.append(f'<td class="{" ".join(c for c in classes if c)}">{content}</td>')
         body.append(f'<tr class="{row_class}">{"".join(cells)}</tr>')
+        if note:
+            note_row_class = "unit-total-note-row" if row_class == "unit-total-row" else "obs-note-row"
+            note_label = "Resumo de observações" if row_class == "unit-total-row" else "Observação"
+            body.append(
+                f'<tr class="{note_row_class}"><td colspan="{col_span}">'
+                f'<span class="obs-note-label">{note_label}</span>'
+                f'<span class="obs-full">{obs_text_html(note)}</span>'
+                f'</td></tr>'
+            )
 
     st.markdown(
         f"""

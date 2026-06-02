@@ -32,7 +32,7 @@ Arquivos principais:
 
 Tabelas principais no banco ativo (SQLite local ou PostgreSQL em producao):
 
-- `base_dinamica`: fonte principal quando a aba `DINAMICA` foi importada.
+- `base_dinamica`: fonte principal consolidada por unidade e operadora. Pode ser alimentada pela aba `DINAMICA` ou por uma base consolidada validada.
 - `faturamento`: base normalizada de faturamento por unidade, operadora e mes.
 - `contabilidade`: base normalizada de recebimentos por unidade, operadora e mes.
 - `de_para_unidades`: padronizacao de nomes de unidades.
@@ -66,18 +66,20 @@ Os totais da planilha nao sao usados. O sistema recalcula totais, diferencas e p
 
 ### Base validada em 02/06/2026
 
-Arquivo usado: `RELATORIO_FAT_ABR_REC_ABR_MAI 01-06-26 (1).xlsx`, aba `DINAMICA`.
+Arquivo usado: `RELATORIO_FAT_ABR_REC_ABR_MAI 01-06-26 (1).xlsx`, aba `Consolidado Abr-Mai`.
 
 Validacao aplicada:
 
-- 120 linhas da planilha encontradas na base.
-- 21 linhas historicas preservadas para marco, com abril/maio zerados.
-- `faturado_abril`: R$ 19.791.682,33.
-- `rec_bruto_abril`: R$ 20.914.898,01.
-- `rec_liquido_abril`: R$ 20.013.112,58.
-- `rec_bruto_maio`: R$ 15.454.014,26.
-- `rec_liquido_maio`: R$ 14.349.406,00.
-- 32 observacoes da planilha confirmadas na base.
+- 124 pares de unidade/operadora encontrados na planilha e na base.
+- 0 divergencias de nomes de operadoras entre a planilha e o banco.
+- 0 divergencias nos valores de abril e maio.
+- `faturado_abril`: R$ 20.463.800,35.
+- `rec_bruto_abril`: R$ 20.060.625,79.
+- `rec_liquido_abril`: R$ 19.226.831,52.
+- `rec_bruto_maio`: R$ 14.068.593,03.
+- `rec_liquido_maio`: R$ 13.044.637,40.
+- 18 observacoes da planilha confirmadas na base.
+- Os valores de marco foram preservados quando o par unidade/operadora tambem existia na base anterior.
 
 O marcador `metadata.base_seed_version` controla a sincronizacao da base operacional com o PostgreSQL no deploy.
 
