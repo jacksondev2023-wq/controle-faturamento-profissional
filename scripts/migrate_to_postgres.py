@@ -51,6 +51,9 @@ ALL_TABLES: list[str] = [
     "inconsistencias_manuais",
     "visual_preferences",
     "consolidado_historico",
+    "metadata",
+    "raw_faturamento_upload",
+    "raw_contabilidade_upload",
 ]
 
 
