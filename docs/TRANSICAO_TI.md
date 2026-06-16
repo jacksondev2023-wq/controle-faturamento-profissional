@@ -158,8 +158,19 @@ Quando chegar a hora, enviar:
 
 - Link do repositorio Git.
 - Este documento.
+- `docs/OPERACAO_MANUTENCAO_E_PASSAGEM_TI.md`.
 - `docs/DEPLOY_PROFISSIONAL.md`.
 - Lista de variaveis de ambiente.
 - Backup/export do banco atual.
 - Comando de migracao.
 - Contatos responsaveis pelo processo de faturamento/recebimento.
+
+## Documento operacional detalhado
+
+O roteiro completo de operacao, manutencao, upgrades, incidentes, backup, manutencao de banco e passagem para TI esta em:
+
+```text
+docs/OPERACAO_MANUTENCAO_E_PASSAGEM_TI.md
+```
+
+Esse documento deve ser mantido atualizado sempre que houver mudanca relevante na arquitetura, no banco, no processo de deploy ou no fluxo mensal de carga.

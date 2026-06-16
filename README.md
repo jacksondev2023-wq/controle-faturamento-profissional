@@ -1,56 +1,66 @@
-
 # Controle Executivo de Faturamento x Recebimento
 
-Projeto web em **Streamlit + SQLite** para transformar o relatório manual de faturamento vs. recebimento em uma ferramenta profissional, atualizável por upload e preparada para evoluir no Codex/VS Code.
+Projeto web em **Streamlit + PostgreSQL** para transformar o relatorio manual de faturamento vs. recebimento em uma ferramenta profissional, atualizavel por upload, com banco persistente para uso por outras pessoas e preparada para futura transicao para a TI.
+
+Em desenvolvimento local, o projeto tambem funciona com SQLite em `data/app.db`.
 
 ## Objetivo
 
-Manter a mesma visão executiva que a diretoria já entende, mas tirando o processo do modo manual/amador.
+Manter a mesma visao executiva que a diretoria ja entende, mas tirando o processo do modo manual/amador.
 
-A aplicação permite:
+A aplicacao permite:
 
-- usar os arquivos reais já enviados como base inicial;
+- usar os arquivos reais ja enviados como base inicial;
 - carregar novos faturamentos por upload;
 - carregar novas bases da contabilidade por upload;
-- escolher mês(es) de faturamento;
-- escolher mês(es) de recebimento;
-- manter DE/PARA editável de unidades e operadoras;
+- escolher mes(es) de faturamento;
+- escolher mes(es) de recebimento;
+- manter DE/PARA editavel de unidades e operadoras;
 - gerar dashboard executivo;
-- visualizar pendências;
+- visualizar pendencias;
+- marcar farol de diretoria por linha;
+- editar observacoes diretamente no consolidado;
+- gerar visao de acerto de contas;
 - exportar Excel profissional;
-- separar comentários manuais dos comentários fiscais.
+- separar comentarios manuais dos comentarios fiscais.
 
 ## Estrutura do projeto
 
 ```text
-controle_faturamento_profissional/
-├── app.py
-├── requirements.txt
-├── data/
-│   ├── app.db
-│   ├── raw/
-│   │   ├── faturamento_abril_2026.xlsx
-│   │   ├── contabilidade_abril_maio_2026.xlsx
-│   │   ├── modelo_historico_fat_mar_rec_mar_abr.xlsx
-│   │   ├── relatorio_atual_fat_abr_rec_abr_mai.xlsx
-│   │   └── prompt_original.txt
-│   └── processed/
-├── scripts/
-│   └── seed_database.py
-├── src/
-│   └── etl.py
-└── docs/
-    └── CODEX_CONTEXT.md
+controle-faturamento-profissional/
+|-- app.py
+|-- requirements.txt
+|-- runtime.txt
+|-- render.yaml
+|-- data/
+|   |-- app.db
+|   |-- raw/
+|   `-- processed/
+|-- scripts/
+|   |-- seed_database.py
+|   |-- import_dinamica_base.py
+|   `-- migrate_to_postgres.py
+|-- src/
+|   |-- db.py
+|   |-- etl.py
+|   |-- acerto_contas.py
+|   `-- consolidado_component.py
+`-- docs/
 ```
 
-## Como rodar
+## Como rodar localmente
 
 Dentro da pasta do projeto:
 
-```bash
+```powershell
 pip install -r requirements.txt
-python scripts/seed_database.py
 streamlit run app.py
+```
+
+Para recriar a base SQLite local a partir dos arquivos de seed:
+
+```powershell
+python scripts/seed_database.py
 ```
 
 ## Deploy profissional
@@ -69,9 +79,15 @@ Para uma futura transicao para infraestrutura da TI, use:
 docs/TRANSICAO_TI.md
 ```
 
-## Documentação técnica atualizada
+Para operacao continua, manutencoes, upgrades e plano detalhado de passagem para TI, use:
 
-A documentação completa do estado atual do projeto, incluindo fluxo de dados, importação da aba `DINAMICA`, preferências de visualização e deploy, está em:
+```text
+docs/OPERACAO_MANUTENCAO_E_PASSAGEM_TI.md
+```
+
+## Documentacao tecnica
+
+A documentacao completa do estado atual do projeto, incluindo fluxo de dados, importacao da aba `DINAMICA`, preferencias de visualizacao e deploy, esta em:
 
 ```text
 docs/PROJETO_CONTROLE_FATURAMENTO.md
@@ -79,29 +95,29 @@ docs/PROJETO_CONTROLE_FATURAMENTO.md
 
 ## Base inicial
 
-A base inicial já usa os arquivos enviados:
+A base inicial usa os arquivos enviados no processo de construcao:
 
-- Faturamento de Abril/2026;
-- Contabilidade de Abril e Maio/2026;
-- Relatório histórico Março/Abril;
-- Relatório atual Abril/Maio;
-- Prompt original do processo.
+- faturamento de Abril/2026;
+- contabilidade de Abril e Maio/2026;
+- relatorio historico Marco/Abril;
+- relatorio atual Abril/Maio;
+- prompt original do processo.
 
-## Observação importante sobre março
+## Observacao importante sobre marco
 
-O mês de março está incluído como **histórico consolidado** a partir do modelo antigo.
+O mes de marco esta incluido como historico consolidado a partir do modelo antigo.
 
-Para uma análise totalmente rastreável de março, com nota, atendimento, paciente, operadora e recebimento bruto/líquido, será necessário importar os arquivos brutos de:
+Para uma analise totalmente rastreavel de marco, com nota, atendimento, paciente, operadora e recebimento bruto/liquido, sera necessario importar os arquivos brutos de:
 
-- faturamento de março;
-- contabilidade de março.
+- faturamento de marco;
+- contabilidade de marco.
 
-## Próximos passos recomendados
+## Proximos passos recomendados
 
-1. Melhorar layout visual do dashboard.
-2. Criar tela de comentários manuais por filial/operadora.
-3. Criar autenticação de usuários.
-4. Migrar SQLite para PostgreSQL.
-5. Criar histórico mensal definitivo.
-6. Criar exportação PDF para diretoria.
-7. Criar logs de importação e validação.
+1. Formalizar ambiente de homologacao separado da producao.
+2. Criar autenticacao nominal por usuario ou SSO corporativo.
+3. Criar trilha de auditoria para farol, observacoes, DE/PARA e importacoes.
+4. Estruturar modulo executivo de glosas.
+5. Migrar banco para plano com backup/persistencia adequada ou infraestrutura da TI.
+6. Criar processo mensal formal de carga, validacao e backup.
+7. Criar exportacao PDF para diretoria.

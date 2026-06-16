@@ -70,3 +70,11 @@ O Render esta configurado com `autoDeploy: true`, entao o push na branch `main` 
 - Preferir repositorio privado por conter regra de negocio e dados financeiros.
 - Nao depender de `data/app.db` como banco de producao.
 - Fazer backup do PostgreSQL antes de grandes importacoes.
+
+## Operacao e manutencao continua
+
+Depois do deploy, use o manual abaixo para rotina operacional, manutencoes, upgrades, backup, incidentes, alteracoes de banco e passagem futura para TI:
+
+```text
+docs/OPERACAO_MANUTENCAO_E_PASSAGEM_TI.md
+```
