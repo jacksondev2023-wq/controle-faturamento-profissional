@@ -29,6 +29,18 @@ SYNC_CLOUD_SEED=0
 
 `SYNC_CLOUD_SEED=0` protege o banco cloud contra sobrescrita automatica a cada deploy. Atualizacoes de base devem ser feitas pelo proprio portal ou por migracao controlada.
 
+## Uso temporario do plano Free do Render
+
+O plano Free pode ser usado para piloto, validacao com a diretoria e testes com usuarios. Ele nao deve ser tratado como ambiente definitivo, porque bancos gratuitos em plataformas cloud normalmente tem limites de retencao, backup, desempenho e disponibilidade.
+
+Antes de liberar como producao oficial, escolha um destes caminhos:
+
+- trocar o PostgreSQL do Render para um plano pago com persistencia e backup;
+- migrar o banco para a infraestrutura da TI;
+- manter o Render apenas como homologacao/teste.
+
+Enquanto estiver no Free, evite depender dele como unica copia dos dados. Faca exportacao ou backup antes de importacoes grandes e antes de demonstracoes importantes.
+
 ## Migrar o banco local para PostgreSQL
 
 Depois de criar o banco PostgreSQL, rode localmente:

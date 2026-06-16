@@ -45,11 +45,19 @@ Banco atual local:
 data/app.db
 ```
 
-Banco recomendado para producao:
+Banco temporario para validacao externa:
+
+```text
+PostgreSQL gerenciado no Render
+```
+
+Banco recomendado para producao definitiva:
 
 ```text
 PostgreSQL
 ```
+
+Se o Render estiver no plano Free, trate como ambiente de piloto/homologacao. A base definitiva deve ficar em plano com backup/persistencia adequada ou no banco corporativo da TI.
 
 Tabelas mais importantes:
 
@@ -155,4 +163,3 @@ Quando chegar a hora, enviar:
 - Backup/export do banco atual.
 - Comando de migracao.
 - Contatos responsaveis pelo processo de faturamento/recebimento.
-
