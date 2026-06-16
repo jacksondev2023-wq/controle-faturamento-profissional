@@ -983,6 +983,16 @@ def require_app_password():
 
 require_app_password()
 
+def render_logout_button():
+    if not runtime_secret("APP_PASSWORD"):
+        return
+    if not st.session_state.get("app_authenticated", False):
+        return
+    st.sidebar.divider()
+    if st.sidebar.button("Sair", key="app_logout_button", use_container_width=True):
+        st.session_state.pop("app_authenticated", None)
+        st.rerun()
+
 REPORT_TYPES = [
     {
         "label": "Relatório Executivo Excel",
@@ -1075,6 +1085,7 @@ def render_sidebar_nav() -> str:
         f'<nav class="side-nav">{"".join(links)}</nav>',
         unsafe_allow_html=True,
     )
+    render_logout_button()
     return NAV_ID_TO_PAGE[selected_id]
 
 def render_global_parameters():
