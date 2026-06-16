@@ -939,6 +939,29 @@ div[data-testid="stFileUploader"] section {
 div[data-testid="stFileUploader"] button {
     border-radius: 4px;
 }
+section[data-testid="stSidebar"] .stButton > button {
+    width: 100%;
+    justify-content: flex-start;
+    border: 1px solid rgba(255,255,255,0.16);
+    background: rgba(255,255,255,0.04);
+    color: #FFFFFF;
+    border-radius: 5px;
+    min-height: 42px;
+    font-weight: 650;
+}
+section[data-testid="stSidebar"] .stButton > button:hover {
+    border-color: rgba(255,255,255,0.38);
+    background: rgba(255,255,255,0.10);
+    color: #FFFFFF;
+}
+section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
+    background: #FFFFFF !important;
+    border-color: #FFFFFF !important;
+    color: #001F4E !important;
+}
+section[data-testid="stSidebar"] .stButton > button p {
+    color: inherit !important;
+}
 .small-muted {color:#667085; font-size: 0.88rem;}
 h1, h2, h3 {letter-spacing: -0.02em;}
 </style>
@@ -969,16 +992,64 @@ def require_app_password():
     if st.session_state.get("app_authenticated", False):
         return
 
-    st.markdown('<div class="section-title">Acesso restrito</div>', unsafe_allow_html=True)
-    st.caption("Informe a senha do portal para acessar o painel executivo.")
+    st.markdown(
+        """
+        <style>
+        .block-container {
+            max-width: 560px !important;
+            padding-top: 12vh !important;
+        }
+        [data-testid="stForm"] {
+            background: #FFFFFF;
+            border: 1px solid #D8DCE7;
+            border-radius: 8px;
+            padding: 26px 28px 22px 28px;
+            box-shadow: 0 18px 44px rgba(0, 31, 78, 0.12);
+        }
+        [data-testid="stForm"] label p {
+            color: #001F4E !important;
+            font-weight: 700 !important;
+        }
+        .auth-header {
+            text-align: center;
+            margin-bottom: 18px;
+        }
+        .auth-kicker {
+            color: #5F6472;
+            font-size: 0.84rem;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+        .auth-title {
+            color: #001F4E;
+            font-size: 2rem;
+            font-weight: 850;
+            line-height: 1.05;
+            margin-top: 8px;
+        }
+        .auth-subtitle {
+            color: #5F6472;
+            font-size: 0.98rem;
+            margin-top: 8px;
+        }
+        </style>
+        <div class="auth-header">
+            <div class="auth-kicker">Acesso restrito</div>
+            <div class="auth-title">Controle Executivo</div>
+            <div class="auth-subtitle">Faturamento x Recebimento</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     with st.form("app_login_form"):
-        password = st.text_input("Senha", type="password")
-        submitted = st.form_submit_button("Entrar", type="primary")
-    if submitted:
-        if hmac.compare_digest(password, expected_password):
-            st.session_state["app_authenticated"] = True
-            st.rerun()
-        st.error("Senha invalida.")
+        password = st.text_input("Senha do portal", type="password")
+        submitted = st.form_submit_button("Entrar", type="primary", use_container_width=True)
+        if submitted:
+            if hmac.compare_digest(password, expected_password):
+                st.session_state["app_authenticated"] = True
+                st.rerun()
+            st.error("Senha invalida.")
     st.stop()
 
 require_app_password()
@@ -1055,36 +1126,43 @@ def render_sidebar_nav() -> str:
         section[data-testid="stSidebar"] > div {{
             padding: {'14px 8px' if is_compact else '18px 16px 20px 16px'} !important;
         }}
-        {'section[data-testid="stSidebar"] .side-brand p, section[data-testid="stSidebar"] .side-brand h1, section[data-testid="stSidebar"] .side-nav a .nav-text, section[data-testid="stSidebar"] .menu-toggle .nav-text, section[data-testid="stSidebar"] [data-testid="stExpander"] { display: none !important; }' if is_compact else ''}
-        {'section[data-testid="stSidebar"] .side-nav a { justify-content: center; padding: 0; } section[data-testid="stSidebar"] .nav-icon { width: 36px; } section[data-testid="stSidebar"] .menu-toggle { justify-content: center; }' if is_compact else ''}
+        {'section[data-testid="stSidebar"] .side-brand p, section[data-testid="stSidebar"] .side-brand h1, section[data-testid="stSidebar"] [data-testid="stExpander"] { display: none !important; }' if is_compact else ''}
+        {'section[data-testid="stSidebar"] .stButton > button { justify-content: center; padding-left: 0.35rem; padding-right: 0.35rem; }' if is_compact else ''}
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    links = []
-    for page_id, label, icon in NAV_ITEMS:
-        active = " active" if page_id == selected_id else ""
-        links.append(
-            f'<a class="nav-link{active}" href="?p={page_id}&menu={menu_mode}" target="_self" title="{escape(label)}">'
-            f'<span class="nav-icon">{icon}</span>'
-            f'<span class="nav-text">{escape(label)}</span>'
-            "</a>"
-        )
+    def switch_page(page_id: str, mode: str):
+        st.session_state["current_page_id"] = page_id
+        st.session_state["menu_mode"] = mode
+        st.query_params["p"] = page_id
+        st.query_params["menu"] = mode
+        st.rerun()
 
     toggle_mode = "full" if is_compact else "compact"
     toggle_label = "Expandir menu" if is_compact else "Recolher menu"
-    toggle_icon = "»" if is_compact else "«"
     st.sidebar.markdown(
         '<div class="side-brand">'
         '<h1>Controle Executivo</h1>'
         '<p>Faturamento x Recebimento</p>'
-        '</div>'
-        f'<a class="nav-link menu-toggle" href="?p={selected_id}&menu={toggle_mode}" target="_self" title="{toggle_label}">'
-        f'<span class="nav-icon">{toggle_icon}</span><span class="nav-text">{toggle_label}</span></a>'
-        f'<nav class="side-nav">{"".join(links)}</nav>',
+        '</div>',
         unsafe_allow_html=True,
     )
+    toggle_button_label = ">>" if is_compact else f"<< {toggle_label}"
+    if st.sidebar.button(toggle_button_label, key="nav_toggle", use_container_width=True):
+        switch_page(selected_id, toggle_mode)
+
+    for page_id, label, icon in NAV_ITEMS:
+        button_label = icon if is_compact else f"{icon} {label}"
+        if st.sidebar.button(
+            button_label,
+            key=f"nav_{page_id}",
+            type="primary" if page_id == selected_id else "secondary",
+            use_container_width=True,
+        ):
+            switch_page(page_id, menu_mode)
+
     render_logout_button()
     return NAV_ID_TO_PAGE[selected_id]
 
