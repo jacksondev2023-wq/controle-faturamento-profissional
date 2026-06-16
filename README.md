@@ -63,6 +63,12 @@ O passo a passo esta em:
 docs/DEPLOY_PROFISSIONAL.md
 ```
 
+Para uma futura transicao para infraestrutura da TI, use:
+
+```text
+docs/TRANSICAO_TI.md
+```
+
 ## Documentação técnica atualizada
 
 A documentação completa do estado atual do projeto, incluindo fluxo de dados, importação da aba `DINAMICA`, preferências de visualização e deploy, está em:
