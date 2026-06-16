@@ -46,10 +46,10 @@ def normalize_base(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy() if df is not None else pd.DataFrame(columns=DINAMICA_COLUMNS)
     for col in DINAMICA_COLUMNS:
         if col not in out:
-            out[col] = 0 if col not in {"unidade_original", "unidade_padrao", "operadora_original", "operadora_padrao", "observacao", "origem_arquivo", "atualizado_em"} else ""
+            out[col] = 0 if col not in {"unidade_original", "unidade_padrao", "operadora_original", "operadora_padrao", "sinal_diretoria", "observacao", "origem_arquivo", "atualizado_em"} else ""
     out = out[DINAMICA_COLUMNS].copy()
     numeric_cols = [
-        "linha_origem", "faturado_marco", "faturado_abril", "rec_bruto_marco", "rec_liquido_marco",
+        "linha_origem", "alerta_diretoria", "faturado_marco", "faturado_abril", "rec_bruto_marco", "rec_liquido_marco",
         "rec_bruto_abril", "rec_liquido_abril", "rec_bruto_maio", "rec_liquido_maio",
     ]
     for col in numeric_cols:
@@ -86,7 +86,7 @@ def merge_base(existing: pd.DataFrame, incoming: pd.DataFrame, columns: list[str
         else:
             new_row = {col: row.get(col, 0) for col in DINAMICA_COLUMNS}
             for col in DINAMICA_COLUMNS:
-                if col not in columns and col not in {"linha_origem", "unidade_original", "unidade_padrao", "operadora_original", "operadora_padrao", "origem_arquivo", "atualizado_em"}:
+                if col not in columns and col not in {"linha_origem", "unidade_original", "unidade_padrao", "operadora_original", "operadora_padrao", "alerta_diretoria", "sinal_diretoria", "origem_arquivo", "atualizado_em"}:
                     new_row[col] = "" if col == "observacao" else 0
             new_row["origem_arquivo"] = source_name
             new_row["atualizado_em"] = now

@@ -3,6 +3,7 @@ __pycache__/
 .env
 .venv/
 data/*streamlit*.log
+data/app.db
 data/*.png
 data/*.jpg
 data/*.jpeg

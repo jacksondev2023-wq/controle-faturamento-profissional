@@ -6,3 +6,10 @@ services:
     startCommand: streamlit run app.py --server.address 0.0.0.0 --server.port $PORT
     plan: free
     autoDeploy: true
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: APP_PASSWORD
+        sync: false
+      - key: SYNC_CLOUD_SEED
+        value: "0"

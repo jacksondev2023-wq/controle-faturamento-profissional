@@ -15,6 +15,7 @@ sync_cloud_seed_if_newer
 from __future__ import annotations
 
 import logging
+import os
 import re
 import sqlite3
 from pathlib import Path
@@ -38,16 +39,48 @@ DB_PATH = ROOT / "data" / "app.db"
 # Detecção de modo (computada uma única vez no nível do módulo)
 # ---------------------------------------------------------------------------
 
+def _env_database_url() -> str:
+    """Return the first PostgreSQL URL configured through environment variables."""
+    for name in ("DATABASE_URL", "POSTGRES_URL", "NEON_DATABASE_URL"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _normalise_database_url(url: str) -> str:
+    """Normalize provider URLs for SQLAlchemy."""
+    url = str(url or "").strip()
+    if url.startswith("postgres://"):
+        return "postgresql://" + url[len("postgres://"):]
+    return url
+
+
+def _secret_bool(name: str, default: bool = False) -> bool:
+    """Read a boolean flag from env or Streamlit secrets."""
+    value = os.environ.get(name)
+    if value is None:
+        try:
+            if name in st.secrets:
+                value = st.secrets[name]
+        except Exception:
+            value = None
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "sim", "on"}
+
+
 def _detect_cloud() -> bool:
-    """Verifica se o Streamlit possui a seção [connections.postgresql] em secrets."""
+    """Detecta PostgreSQL por DATABASE_URL ou por secrets do Streamlit."""
+    if _env_database_url():
+        logger.info("Modo cloud detectado (PostgreSQL via DATABASE_URL).")
+        return True
     try:
         secrets = st.secrets
-        # st.secrets pode ter a chave "connections" como AttrDict
         if "connections" in secrets and "postgresql" in secrets["connections"]:
             logger.info("Modo cloud detectado (PostgreSQL via Streamlit secrets).")
             return True
     except Exception:
-        # FileNotFoundError quando secrets.toml não existe, etc.
         pass
     logger.info("Modo local detectado (SQLite em %s).", DB_PATH)
     return False
@@ -73,18 +106,24 @@ def get_engine():
     """Returns a SQLAlchemy engine for the active backend.
 
     * **Cloud**: constrói a connection string a partir de
-      ``st.secrets["connections"]["postgresql"]``.
+      ``DATABASE_URL``/``POSTGRES_URL`` ou ``st.secrets["connections"]["postgresql"]``.
       Suporta tanto ``connection_url`` (Neon) quanto chaves individuais.
     * **Local**: usa SQLite em ``data/app.db``.
     """
     from sqlalchemy import create_engine  # import tardio
 
     if _CLOUD_MODE:
+        env_url = _env_database_url()
+        if env_url:
+            url = _normalise_database_url(env_url)
+            logger.info("Criando engine PostgreSQL via DATABASE_URL.")
+            return create_engine(url, pool_pre_ping=True)
+
         pg = st.secrets["connections"]["postgresql"]
 
         # Modo 1: URL completa (ex.: Neon)
         if "connection_url" in pg:
-            url = pg["connection_url"]
+            url = _normalise_database_url(pg["connection_url"])
             logger.info("Criando engine PostgreSQL via connection_url.")
             engine = create_engine(url, pool_pre_ping=True)
         else:
@@ -509,6 +548,10 @@ def sync_cloud_seed_if_newer() -> None:
     global _LAST_SYNCED_SEED_VERSION
 
     if not _CLOUD_MODE or not DB_PATH.exists():
+        return
+
+    if not _secret_bool("SYNC_CLOUD_SEED", default=False):
+        logger.info("seed sync: desativado. Defina SYNC_CLOUD_SEED=1 para sincronizar seed operacional.")
         return
 
     seed_version = _read_sqlite_metadata_value("base_seed_version")

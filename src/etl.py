@@ -1,5 +1,6 @@
 
 import re
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple, List
@@ -179,6 +180,7 @@ def norm_text(value) -> str:
     }
     for old, new in replacements.items():
         value = value.replace(old, new)
+    value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
     return value
 
 def find_col(df: pd.DataFrame, aliases: List[str]) -> Optional[str]:
@@ -410,6 +412,8 @@ DINAMICA_COLUMNS = [
     "rec_liquido_abril",
     "rec_bruto_maio",
     "rec_liquido_maio",
+    "alerta_diretoria",
+    "sinal_diretoria",
     "observacao",
     "origem_arquivo",
     "atualizado_em",
@@ -424,6 +428,26 @@ def _cell_number(value) -> float:
         return float(value)
     except Exception:
         return float(parse_money(pd.Series([value])).iloc[0])
+
+def _color_rgb(color) -> str:
+    rgb = getattr(color, "rgb", None)
+    if not rgb:
+        return ""
+    return str(rgb).upper()[-6:]
+
+def _is_director_alert_rgb(rgb: str) -> bool:
+    if not rgb or len(rgb) != 6:
+        return False
+    try:
+        red, green, blue = int(rgb[0:2], 16), int(rgb[2:4], 16), int(rgb[4:6], 16)
+    except ValueError:
+        return False
+    return red >= 200 and green <= 215 and blue <= 215 and (blue >= 80 or green < 140)
+
+def _cell_has_director_alert(cell) -> bool:
+    fill_rgb = _color_rgb(getattr(getattr(cell, "fill", None), "fgColor", None))
+    font_rgb = _color_rgb(getattr(getattr(cell, "font", None), "color", None))
+    return _is_director_alert_rgb(fill_rgb) or _is_director_alert_rgb(font_rgb)
 
 def _dinamica_column_key(header_value) -> Optional[str]:
     header = norm_text(header_value)
@@ -447,7 +471,7 @@ def _dinamica_column_key(header_value) -> Optional[str]:
         return f"faturado_{month_slug}"
     if "REC" in header and "BRUTO" in header:
         return f"rec_bruto_{month_slug}"
-    if "REC" in header and "LIQUIDO" in header:
+    if "REC" in header and ("LIQUIDO" in header or "LQUIDO" in header):
         return f"rec_liquido_{month_slug}"
     return None
 
@@ -542,6 +566,125 @@ def parse_dinamica_workbook(path_or_file, origem: str = "") -> pd.DataFrame:
             "operadora_original": label,
             "operadora_padrao": label,
             **values,
+            "observacao": observacao,
+            "origem_arquivo": source_name,
+            "atualizado_em": now,
+        })
+
+    return pd.DataFrame(rows, columns=DINAMICA_COLUMNS)
+
+def parse_dinamica_workbook(path_or_file, origem: str = "") -> pd.DataFrame:
+    """Le a aba analitica consolidada e retorna linhas de operadora."""
+    wb = load_workbook(path_or_file, data_only=True)
+    preferred_names = {"DINAMICA", "RELATORIO", "ANALITICO", "RELATORIO ANALITICO"}
+    sheet_name = next((name for name in wb.sheetnames if norm_text(name) in preferred_names), None)
+    if not sheet_name:
+        for candidate in wb.worksheets:
+            for row in range(1, min(candidate.max_row, 30) + 1):
+                header_label = norm_text(candidate.cell(row, 1).value)
+                if header_label in {"UNIDADES X OPERADORA", "UNIDADE X OPERADORA", "UNIDADE / OPERADORA", "ROTULOS DE LINHA"}:
+                    sheet_name = candidate.title
+                    break
+            if sheet_name:
+                break
+    if not sheet_name:
+        raise ValueError("A aba analitica consolidada nao foi encontrada no arquivo.")
+    ws = wb[sheet_name]
+
+    unit_candidates: set[str] = set()
+    for candidate_sheet in wb.worksheets:
+        if candidate_sheet.title == sheet_name:
+            continue
+        header_lookup = {}
+        for col in range(1, candidate_sheet.max_column + 1):
+            header_lookup[norm_text(candidate_sheet.cell(1, col).value)] = col
+        unit_col = header_lookup.get("UNIDADE")
+        operator_col = header_lookup.get("OPERADORA")
+        if not unit_col or not operator_col:
+            continue
+        for row in range(2, candidate_sheet.max_row + 1):
+            unit_value = str(candidate_sheet.cell(row, unit_col).value or "").strip()
+            operator_value = str(candidate_sheet.cell(row, operator_col).value or "").strip()
+            if unit_value and operator_value:
+                unit_candidates.add(norm_text(unit_value))
+
+    header_row = None
+    for row in range(1, min(ws.max_row, 30) + 1):
+        header_label = norm_text(ws.cell(row, 1).value)
+        if header_label in {"UNIDADES X OPERADORA", "UNIDADE X OPERADORA", "UNIDADE / OPERADORA", "ROTULOS DE LINHA"}:
+            header_row = row
+            break
+    if header_row is None:
+        raise ValueError("Cabecalho de linhas da aba analitica nao encontrado.")
+
+    column_map: dict[str, int] = {}
+    type_col = None
+    for col in range(2, ws.max_column + 1):
+        if norm_text(ws.cell(header_row, col).value) == "TIPO":
+            type_col = col
+            continue
+        key = _dinamica_column_key(ws.cell(header_row, col).value)
+        if key and key in DINAMICA_COLUMNS and key not in column_map:
+            column_map[key] = col
+    if not any(key.startswith("faturado_") for key in column_map):
+        raise ValueError("Nenhuma coluna de faturamento foi identificada na aba analitica.")
+
+    rows = []
+    current_unit = ""
+    now = datetime.now().strftime("%d/%m/%Y %H:%M")
+    source_name = origem or getattr(path_or_file, "name", "") or "DINAMICA"
+
+    for row in range(header_row + 1, ws.max_row + 1):
+        label = str(ws.cell(row, 1).value or "").strip()
+        if not label:
+            continue
+        if norm_text(label).startswith("TOTAL"):
+            continue
+
+        type_label = norm_text(ws.cell(row, type_col).value) if type_col else ""
+        if type_label == "UNIDADE":
+            current_unit = label
+            continue
+        if type_label and type_label != "OPERADORA":
+            continue
+
+        is_unit_row = not type_col and (
+            norm_text(label) in unit_candidates
+            or bool(ws.cell(row, 1).font and ws.cell(row, 1).font.bold)
+        )
+        if is_unit_row:
+            current_unit = label
+            continue
+        if not current_unit:
+            continue
+
+        values = {
+            "faturado_marco": 0.0,
+            "faturado_abril": 0.0,
+            "rec_bruto_marco": 0.0,
+            "rec_liquido_marco": 0.0,
+            "rec_bruto_abril": 0.0,
+            "rec_liquido_abril": 0.0,
+            "rec_bruto_maio": 0.0,
+            "rec_liquido_maio": 0.0,
+        }
+        for key, col in column_map.items():
+            if key in values:
+                values[key] = _cell_number(ws.cell(row, col).value)
+        observacao_col = column_map.get("observacao")
+        observacao = str(ws.cell(row, observacao_col).value or "").strip() if observacao_col else ""
+        if not any(abs(v) > 0.00001 for v in values.values()) and not observacao:
+            continue
+
+        rows.append({
+            "linha_origem": int(row),
+            "unidade_original": current_unit,
+            "unidade_padrao": current_unit,
+            "operadora_original": label,
+            "operadora_padrao": label,
+            **values,
+            "alerta_diretoria": int(_cell_has_director_alert(ws.cell(row, 1))),
+            "sinal_diretoria": "vermelho" if _cell_has_director_alert(ws.cell(row, 1)) else "",
             "observacao": observacao,
             "origem_arquivo": source_name,
             "atualizado_em": now,

@@ -53,6 +53,16 @@ python scripts/seed_database.py
 streamlit run app.py
 ```
 
+## Deploy profissional
+
+Para uso por outras pessoas, nao dependa do SQLite local. Publique o app no Render/GitHub com PostgreSQL persistente configurado em `DATABASE_URL` e senha de acesso em `APP_PASSWORD`.
+
+O passo a passo esta em:
+
+```text
+docs/DEPLOY_PROFISSIONAL.md
+```
+
 ## Documentação técnica atualizada
 
 A documentação completa do estado atual do projeto, incluindo fluxo de dados, importação da aba `DINAMICA`, preferências de visualização e deploy, está em:
