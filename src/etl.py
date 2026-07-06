@@ -242,11 +242,36 @@ def standardize_unit(series: pd.Series, depara: pd.DataFrame) -> pd.Series:
     mapping = {norm_text(k): norm_text(v) for k, v in zip(depara["sigla_origem"], depara["nome_padrao"])}
     return series.apply(lambda x: mapping.get(norm_text(x), norm_text(x)))
 
-def standardize_operator(series: pd.Series, depara: Optional[pd.DataFrame] = None) -> pd.Series:
+def standardize_operator(unidade_series: pd.Series, operadora_series: pd.Series, depara: Optional[pd.DataFrame] = None) -> pd.Series:
     if depara is None or depara.empty:
         depara = DEFAULT_OPERADORA_DEPARA.copy()
-    mapping = {norm_text(k): norm_text(v) for k, v in zip(depara["sigla_origem"], depara["nome_padrao"])}
-    return series.apply(lambda x: mapping.get(norm_text(x), norm_text(x)))
+        
+    temp = pd.DataFrame({"u": unidade_series.apply(norm_text), "o": operadora_series.apply(norm_text)})
+    has_u = "unidade_origem" in depara and not depara["unidade_origem"].isnull().all()
+    
+    dict_map = {}
+    dict_map_general = {}
+    
+    if has_u:
+        for u, o, p in zip(depara["unidade_origem"].fillna(""), depara["sigla_origem"].fillna(""), depara["nome_padrao"].fillna("")):
+            u_norm, o_norm, p_norm = norm_text(u), norm_text(o), norm_text(p)
+            if u_norm:
+                dict_map[(u_norm, o_norm)] = p_norm
+            else:
+                dict_map_general[o_norm] = p_norm
+    else:
+        for o, p in zip(depara["sigla_origem"].fillna(""), depara["nome_padrao"].fillna("")):
+            dict_map_general[norm_text(o)] = norm_text(p)
+            
+    def get_padrao(row):
+        u_val, o_val = row["u"], row["o"]
+        if (u_val, o_val) in dict_map:
+            return dict_map[(u_val, o_val)]
+        if o_val in dict_map_general:
+            return dict_map_general[o_val]
+        return o_val
+        
+    return temp.apply(get_padrao, axis=1)
 
 def clean_observacao_fiscal(series: pd.Series) -> pd.Series:
     s = series.fillna("").astype(str)
@@ -286,7 +311,7 @@ def prepare_faturamento(
     out["unidade_original"] = df[unidade]
     out["unidade_padrao"] = standardize_unit(df[unidade], depara)
     out["operadora_original"] = df[operadora]
-    out["operadora_padrao"] = standardize_operator(df[operadora], depara_operadoras)
+    out["operadora_padrao"] = standardize_operator(out["unidade_padrao"], df[operadora], depara_operadoras)
     out["paciente"] = df[paciente] if paciente else ""
     out["valor_faturado"] = parse_money(df[valor])
     months = df[data].apply(lambda v: parse_month_year(v, fallback_year))
@@ -326,7 +351,7 @@ def prepare_contabilidade(
     out["unidade_original"] = df[unidade]
     out["unidade_padrao"] = standardize_unit(df[unidade], depara)
     out["operadora_original"] = df[operadora]
-    out["operadora_padrao"] = standardize_operator(df[operadora], depara_operadoras)
+    out["operadora_padrao"] = standardize_operator(out["unidade_padrao"], df[operadora], depara_operadoras)
     out["valor_bruto"] = parse_money(df[bruto])
     out["valor_liquido"] = parse_money(df[liquido])
     if data_pago:
