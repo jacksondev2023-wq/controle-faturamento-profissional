@@ -265,19 +265,8 @@ def standardize_operator(unidade_series: pd.Series, operadora_series: pd.Series,
             
     def get_padrao(row):
         u_val, o_val = row["u"], row["o"]
-        
-        # 1. Heurística de Judicialização (IW)
-        # Se a operadora é "particular", "judic" ou é o nome da própria unidade (ou contida nela), unificamos.
-        if o_val and u_val and (o_val in u_val or u_val in o_val):
-            # Cuidado com falsos positivos de nomes curtos, mas nomes de unidades geralmente são longos (ex: LIFE HOME CARE - PE)
-            if len(o_val) > 8:
-                return "PROCESSO JUDICIALIZADO"
-                
-        if o_val and ("PARTIC" in o_val or "JUDIC" in o_val):
-            return "PROCESSO JUDICIALIZADO"
-            
         # Regra solicitada: Hapvida na Life entra como judicializado/particular
-        if "HAPVIDA" in o_val and "LIFE" in u_val:
+        if o_val and "HAPVIDA" in o_val and "LIFE" in u_val:
             return "PROCESSO JUDICIALIZADO"
             
         # 2. De-Para Customizado
@@ -809,46 +798,7 @@ def dinamica_to_raw_tables(base: pd.DataFrame, year: int = 2026, origem: str = "
 def build_consolidado(faturamento: pd.DataFrame, contabilidade: pd.DataFrame, fat_months: list[int], rec_months: list[int], year: int = 2026) -> pd.DataFrame:
     fat = faturamento.copy()
     cont = contabilidade.copy()
-    
-    # === PROCV POR SEMELHANÇA ===
-    # A contabilidade dita a regra de nome de operadora. Se houver discrepância por sufixos (ex: AMIL vs AMIL - PB),
-    # o faturamento herdará o nome idêntico da contabilidade automaticamente.
-    if not cont.empty and not fat.empty:
-        cont_ops = cont[['unidade_padrao', 'operadora_padrao']].drop_duplicates()
-        
-        import re
-        def super_norm(x):
-            return re.sub(r'[^a-zA-Z0-9]', '', str(x).upper())
-            
-        cont_ops['u_norm'] = cont_ops['unidade_padrao'].apply(super_norm)
-        
-        def match_operator(row):
-            u_fat_raw = str(row['unidade_padrao']).strip()
-            o_fat = str(row['operadora_padrao']).strip()
-            if not o_fat:
-                return o_fat
-                
-            u_fat_norm = super_norm(u_fat_raw)
-            ops_na_cont = cont_ops[cont_ops['u_norm'] == u_fat_norm]['operadora_padrao'].tolist()
-            
-            if o_fat in ops_na_cont:
-                return o_fat
-                
-            # Procura por substring (Faturamento contido na Contabilidade ou vice-versa)
-            for o_cont in ops_na_cont:
-                o_c_str = str(o_cont).strip()
-                if not o_c_str:
-                    continue
-                # Se o nome do faturamento for longo o suficiente e estiver contido no da contabilidade
-                if len(o_fat) >= 4 and o_fat in o_c_str:
-                    return o_cont
-                # Ou se a contabilidade estiver contida no faturamento
-                if len(o_c_str) >= 4 and o_c_str in o_fat:
-                    return o_cont
-            return o_fat
-            
-        fat['operadora_padrao'] = fat.apply(match_operator, axis=1)
-    # === FIM PROCV ===
+    # O Procv dinâmico foi removido para evitar o sumiço de colunas e meses.
 
     base = pd.DataFrame(columns=["unidade_padrao", "operadora_padrao"])
     fat_cols = []
