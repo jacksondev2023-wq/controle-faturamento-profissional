@@ -5127,10 +5127,27 @@ def render_consolidado_tabs(
         with colA:
             st.markdown('<div class="section-title">Consolidado por Unidade e Operadora</div>', unsafe_allow_html=True)
         with colB:
+            # Exportação bem formatada
             import io
             buf = io.BytesIO()
             with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
                 filtered.to_excel(writer, index=False, sheet_name="Consolidado")
+                wb = writer.book
+                ws = writer.sheets["Consolidado"]
+                money_fmt = wb.add_format({"num_format": 'R$ #,##0.00', "border": 1})
+                pct_fmt = wb.add_format({"num_format": '0.00%', "border": 1})
+                header_fmt = wb.add_format({"bold": True, "font_color": "white", "bg_color": "#17365D", "border": 1})
+                
+                for col_num, value in enumerate(filtered.columns.values):
+                    ws.write(0, col_num, value, header_fmt)
+                    col_name = str(value).lower()
+                    if "faturado" in col_name or "recebido" in col_name or "diferenca" in col_name or "valor" in col_name:
+                        ws.set_column(col_num, col_num, 18, money_fmt)
+                    elif "perc" in col_name or "%" in col_name:
+                        ws.set_column(col_num, col_num, 12, pct_fmt)
+                    else:
+                        ws.set_column(col_num, col_num, 30)
+
             st.download_button(
                 "📥 Extrair para Excel",
                 data=buf.getvalue(),
