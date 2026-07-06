@@ -1545,10 +1545,14 @@ def load_operational_tables(year: int = 2026) -> tuple[pd.DataFrame, pd.DataFram
     ensure_base_dinamica_table()
     ensure_lancamentos_manuais_table()
     base = normalize_base_dinamica(read_table("base_dinamica"))
-    if base.empty:
-        fat_generated, cont_generated = read_table("faturamento"), read_table("contabilidade")
-    else:
-        fat_generated, cont_generated = dinamica_to_raw_tables(base, year=int(year), origem="base_dinamica")
+    fat_generated = read_table("faturamento")
+    cont_generated = read_table("contabilidade")
+    
+    if not base.empty:
+        fat_hist, cont_hist = dinamica_to_raw_tables(base, year=int(year), origem="base_dinamica")
+        fat_generated = pd.concat([fat_hist, fat_generated], ignore_index=True) if not fat_generated.empty else fat_hist
+        cont_generated = pd.concat([cont_hist, cont_generated], ignore_index=True) if not cont_generated.empty else cont_hist
+
     
     # Injeta Lançamentos Manuais
     try:
