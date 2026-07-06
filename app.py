@@ -5602,14 +5602,32 @@ ensure_inconsistencias_table()
 current_page = render_sidebar_nav()
 year, fat_months, rec_months = render_global_parameters()
 
-depara = read_table("de_para_unidades")
-if depara.empty:
-    depara = DEFAULT_DEPARA.copy()
-    write_table("de_para_unidades", depara)
-depara_operadoras = read_table("de_para_operadoras")
-if depara_operadoras.empty:
-    depara_operadoras = DEFAULT_OPERADORA_DEPARA.copy()
-    write_table("de_para_operadoras", depara_operadoras)
+depara_legado = read_table("de_para_unidades")
+depara_ops_legado = read_table("de_para_operadoras")
+
+depara_fat = read_table("de_para_unidades_fat")
+if depara_fat.empty:
+    depara_fat = depara_legado.copy() if not depara_legado.empty else DEFAULT_DEPARA.copy()
+    write_table("de_para_unidades_fat", depara_fat)
+
+depara_cont = read_table("de_para_unidades_cont")
+if depara_cont.empty:
+    depara_cont = depara_legado.copy() if not depara_legado.empty else DEFAULT_DEPARA.copy()
+    write_table("de_para_unidades_cont", depara_cont)
+
+depara_ops_fat = read_table("de_para_operadoras_fat")
+if depara_ops_fat.empty:
+    depara_ops_fat = depara_ops_legado.copy() if not depara_ops_legado.empty else DEFAULT_OPERADORA_DEPARA.copy()
+    write_table("de_para_operadoras_fat", depara_ops_fat)
+
+depara_ops_cont = read_table("de_para_operadoras_cont")
+if depara_ops_cont.empty:
+    depara_ops_cont = depara_ops_legado.copy() if not depara_ops_legado.empty else DEFAULT_OPERADORA_DEPARA.copy()
+    write_table("de_para_operadoras_cont", depara_ops_cont)
+
+# Aliases de compatibilidade para partes da UI que nao precisaram dividir
+depara = depara_fat
+depara_operadoras = depara_ops_fat
 
 fat, cont, base_dinamica = load_operational_tables(int(year))
 hist = read_table("consolidado_historico")
@@ -5675,28 +5693,52 @@ elif current_page == "DE/PARA":
         "Governança DE/PARA",
         "Gerencie o mapeamento entre nomenclaturas de origem e padrões do sistema.",
     )
-    depara_units_tab, depara_ops_tab = st.tabs(["DE/PARA de Unidades", "DE/PARA de Operadoras"])
+    depara_units_fat_tab, depara_ops_fat_tab, depara_units_cont_tab, depara_ops_cont_tab = st.tabs([
+        "Unidades (Fat.)", 
+        "Operadoras (Fat.)",
+        "Unidades (Rec.)",
+        "Operadoras (Rec.)"
+    ])
 
-    with depara_units_tab:
+    with depara_units_fat_tab:
         render_depara_manager(
-            title="DE/PARA de Unidades",
-            description="Controle os nomes de filiais/unidades vindos do faturamento e da contabilidade.",
-            mapping=depara,
-            source_values=source_values_for_depara(fat, cont, "unidade_original"),
-            table_name="de_para_unidades",
-            key_prefix="depara_unidades",
-            search_placeholder="Buscar unidade, filial ou nome padrão...",
+            title="DE/PARA de Unidades (Faturamento)",
+            description="Controle os nomes de filiais/unidades vindos do faturamento.",
+            mapping=depara_fat,
+            source_values=source_values_for_depara(fat, "unidade_original"),
+            table_name="de_para_unidades_fat",
+            key_prefix="depara_unidades_fat",
+            search_placeholder="Buscar unidade...",
         )
-
-    with depara_ops_tab:
+    with depara_ops_fat_tab:
         render_depara_manager(
-            title="DE/PARA de Operadoras",
-            description="Padronize convênios e variações por estado, grupo ou origem contábil.",
-            mapping=depara_operadoras,
-            source_values=source_values_for_depara(fat, cont, "operadora_original"),
-            table_name="de_para_operadoras",
-            key_prefix="depara_operadoras",
-            search_placeholder="Buscar operadora, convênio ou nome padrão...",
+            title="DE/PARA de Operadoras (Faturamento)",
+            description="Padronize convênios vindos do faturamento.",
+            mapping=depara_ops_fat,
+            source_values=source_values_for_depara(fat, "operadora_original"),
+            table_name="de_para_operadoras_fat",
+            key_prefix="depara_ops_fat",
+            search_placeholder="Buscar operadora...",
+        )
+    with depara_units_cont_tab:
+        render_depara_manager(
+            title="DE/PARA de Unidades (Recebimento)",
+            description="Controle os nomes de filiais/unidades vindos da contabilidade.",
+            mapping=depara_cont,
+            source_values=source_values_for_depara(cont, "unidade_original"),
+            table_name="de_para_unidades_cont",
+            key_prefix="depara_unidades_cont",
+            search_placeholder="Buscar unidade...",
+        )
+    with depara_ops_cont_tab:
+        render_depara_manager(
+            title="DE/PARA de Operadoras (Recebimento)",
+            description="Padronize convênios vindos da contabilidade.",
+            mapping=depara_ops_cont,
+            source_values=source_values_for_depara(cont, "operadora_original"),
+            table_name="de_para_operadoras_cont",
+            key_prefix="depara_ops_cont",
+            search_placeholder="Buscar operadora...",
         )
 
 elif current_page == "Dashboard Executivo":
