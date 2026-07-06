@@ -265,9 +265,9 @@ def standardize_operator(unidade_series: pd.Series, operadora_series: pd.Series,
             
     def get_padrao(row):
         u_val, o_val = row["u"], row["o"]
-        # Regra solicitada: Hapvida na Life entra como judicializado/particular
+        # Regra solicitada: Hapvida na Life entra como particular
         if o_val and "HAPVIDA" in o_val and "LIFE" in u_val:
-            return "PROCESSO JUDICIALIZADO"
+            return "PARTICULAR"
             
         # 2. De-Para Customizado
         if (u_val, o_val) in dict_map:
@@ -798,7 +798,39 @@ def dinamica_to_raw_tables(base: pd.DataFrame, year: int = 2026, origem: str = "
 def build_consolidado(faturamento: pd.DataFrame, contabilidade: pd.DataFrame, fat_months: list[int], rec_months: list[int], year: int = 2026) -> pd.DataFrame:
     fat = faturamento.copy()
     cont = contabilidade.copy()
-    # O Procv dinâmico foi removido para evitar o sumiço de colunas e meses.
+    
+    # === PROCV INTELIGENTE POR SEMELHANÇA ===
+    if not cont.empty and not fat.empty:
+        import difflib
+        # Mapeia as operadoras conhecidas da contabilidade por unidade
+        cont_ops = cont.groupby('unidade_padrao')['operadora_padrao'].unique().to_dict()
+        
+        def match_operator(row):
+            u_fat = str(row['unidade_padrao']).strip()
+            o_fat = str(row['operadora_padrao']).strip()
+            if not o_fat:
+                return o_fat
+                
+            ops_na_cont = cont_ops.get(u_fat, [])
+            if o_fat in ops_na_cont:
+                return o_fat
+                
+            # 1. Busca por substring direta (ex: "AMIL" contido em "AMIL - AM/PB/PE/RN")
+            for o_cont in ops_na_cont:
+                o_c_str = str(o_cont).strip()
+                if o_c_str and len(o_fat) > 3 and (o_fat in o_c_str or o_c_str in o_fat):
+                    return o_cont
+                    
+            # 2. Busca por similaridade aproximada
+            if ops_na_cont:
+                matches = difflib.get_close_matches(o_fat, ops_na_cont, n=1, cutoff=0.65)
+                if matches:
+                    return matches[0]
+                    
+            return o_fat
+            
+        fat['operadora_padrao'] = fat.apply(match_operator, axis=1)
+    # === FIM PROCV ===
 
     base = pd.DataFrame(columns=["unidade_padrao", "operadora_padrao"])
     fat_cols = []
