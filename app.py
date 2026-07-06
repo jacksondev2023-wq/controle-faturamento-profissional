@@ -3352,13 +3352,14 @@ def render_depara_operadoras_manager(
     c4.metric("Padrões distintos", standards)
     
     st.markdown('<div class="depara-toolbar">', unsafe_allow_html=True)
-    f1, f2, f3 = st.columns([2, 1, 1])
+    f1, f2, f3, f4 = st.columns([1.5, 1, 1, 1])
     search = f1.text_input("Buscar", placeholder="Buscar operadora...", label_visibility="collapsed", key=f"{key_prefix}_search")
     
-    opts_unidade = ["Todas"] + sorted(grid["unidade_origem"].unique().tolist())
+    opts_unidade = ["Todas (Unidades)"] + sorted(grid["unidade_origem"].unique().tolist())
     filter_unit = f2.selectbox("Filtrar Unidade", opts_unidade, key=f"{key_prefix}_funit", label_visibility="collapsed")
     
-    filter_status = f3.selectbox("Status", ["Todos", "Pendente", "Mapeado"], key=f"{key_prefix}_fstatus", label_visibility="collapsed")
+    filter_em_uso = f3.selectbox("Em Uso", ["Todos (Em uso)", "Sim", "Não"], key=f"{key_prefix}_fuso", label_visibility="collapsed")
+    filter_status = f4.selectbox("Status", ["Todos (Status)", "Pendente", "Mapeado"], key=f"{key_prefix}_fstatus", label_visibility="collapsed")
     st.markdown("</div>", unsafe_allow_html=True)
 
     filtered = grid.copy()
@@ -3369,9 +3370,11 @@ def render_depara_operadoras_manager(
             filtered["nome_padrao"].str.lower().str.contains(q, na=False) |
             filtered["unidade_origem"].str.lower().str.contains(q, na=False)
         ]
-    if filter_unit != "Todas":
+    if filter_unit != "Todas (Unidades)":
         filtered = filtered[filtered["unidade_origem"] == filter_unit]
-    if filter_status != "Todos":
+    if filter_em_uso != "Todos (Em uso)":
+        filtered = filtered[filtered["em_uso"] == filter_em_uso]
+    if filter_status != "Todos (Status)":
         filtered = filtered[filtered["status"] == filter_status]
 
     edited = st.data_editor(
@@ -3443,13 +3446,16 @@ def render_depara_manager(
     c4.metric("Padrões distintos", standards)
 
     st.markdown('<div class="depara-toolbar">', unsafe_allow_html=True)
-    f1, f2 = st.columns([3, 1])
+    f1, f2, f3 = st.columns([2, 1, 1])
     search = f1.text_input("Buscar", placeholder=search_placeholder, label_visibility="collapsed", key=f"{key_prefix}_search")
-    filter_status = f2.selectbox("Status", ["Todos", "Pendente", "Mapeado"], key=f"{key_prefix}_fstatus", label_visibility="collapsed")
+    filter_em_uso = f2.selectbox("Em Uso", ["Todos (Em uso)", "Sim", "Não"], key=f"{key_prefix}_fuso", label_visibility="collapsed")
+    filter_status = f3.selectbox("Status", ["Todos (Status)", "Pendente", "Mapeado"], key=f"{key_prefix}_fstatus", label_visibility="collapsed")
     st.markdown("</div>", unsafe_allow_html=True)
 
     filtered = filter_depara_grid(grid, search)
-    if filter_status != "Todos":
+    if filter_em_uso != "Todos (Em uso)":
+        filtered = filtered[filtered["em_uso"] == filter_em_uso]
+    if filter_status != "Todos (Status)":
         filtered = filtered[filtered["status"] == filter_status]
     edited = st.data_editor(
         filtered,
