@@ -1167,19 +1167,29 @@ def render_sidebar_nav() -> str:
     return NAV_ID_TO_PAGE[selected_id]
 
 def render_global_parameters():
+    if "fat_months" not in st.session_state:
+        st.session_state["fat_months"] = [3, 4, 5]
+    if "rec_months" not in st.session_state:
+        st.session_state["rec_months"] = [3, 4, 5, 6]
+
     with st.sidebar.expander("Parâmetros da análise", expanded=False):
         year = st.number_input("Ano de referência", min_value=2020, max_value=2035, value=2026, step=1)
+        
         fat_months = st.multiselect(
             "Mês(es) do faturamento",
             options=list(MONTHS.keys()),
-            default=[3, 4],
+            default=st.session_state["fat_months"],
             format_func=lambda x: MONTHS[x],
+            key="fat_months_input",
+            on_change=lambda: st.session_state.update({"fat_months": st.session_state["fat_months_input"]})
         )
         rec_months = st.multiselect(
             "Mês(es) de recebimento",
             options=list(MONTHS.keys()),
-            default=[3, 4, 5],
+            default=st.session_state["rec_months"],
             format_func=lambda x: MONTHS[x],
+            key="rec_months_input",
+            on_change=lambda: st.session_state.update({"rec_months": st.session_state["rec_months_input"]})
         )
     return int(year), fat_months, rec_months
 
@@ -3473,16 +3483,30 @@ def render_depara_manager(
         },
     )
 
-    left, right = st.columns([1, 4])
+    left, right = st.columns([2, 3])
     with left:
-        if st.button("Salvar alterações", type="primary", key=f"{key_prefix}_save"):
-            base_to_save = depara_to_save(edited)
-            untouched = mapping[
-                ~mapping["sigla_origem"].apply(norm_text).isin(base_to_save["sigla_origem"].apply(norm_text))
-            ][["sigla_origem", "nome_padrao"]]
-            write_table(table_name, pd.concat([untouched, base_to_save], ignore_index=True))
-            st.success("DE/PARA salvo.")
-            st.rerun()
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            if st.button("Salvar alterações", type="primary", key=f"{key_prefix}_save"):
+                base_to_save = depara_to_save(edited)
+                untouched = mapping[
+                    ~mapping["sigla_origem"].apply(norm_text).isin(base_to_save["sigla_origem"].apply(norm_text))
+                ][["sigla_origem", "nome_padrao"]]
+                write_table(table_name, pd.concat([untouched, base_to_save], ignore_index=True))
+                st.success("DE/PARA salvo.")
+                st.rerun()
+        with col_btn2:
+            import io
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+                mapping.to_excel(writer, index=False, sheet_name="DE_PARA")
+            st.download_button(
+                "Extrair para Excel",
+                data=buf.getvalue(),
+                file_name=f"{table_name}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"{key_prefix}_export_excel"
+            )
     with right:
         st.caption(f"Mostrando {len(filtered)} de {len(grid)} registros.")
 
@@ -4977,6 +5001,17 @@ def render_inline_signal_editor(filtered: pd.DataFrame, base: pd.DataFrame, year
 
 def render_consolidado_analitico(consolidado: pd.DataFrame, fat_months: list[int], rec_months: list[int], base_dinamica: pd.DataFrame | None = None, year: int = 2026):
     render_page_header("Consolidado", "Consulta analítica de faturamento e recebimentos por unidade, operadora e mês.")
+    
+    col_t1, col_t2 = st.columns([7, 3])
+    with col_t2:
+        edit_mode = st.toggle("✏️ Ativar Modo de Edição (Excel)", key="consolidado_edit_mode")
+        
+    if edit_mode:
+        st.info("Você está no modo de edição direta! Altere, exclua ou inclua valores na base bruta. As mudanças refletirão no dashboard e nas planilhas.")
+        bd = base_dinamica if base_dinamica is not None else read_base_dinamica(int(year))
+        render_base_dinamica_editor(bd, int(year))
+        return
+        
     dash = prepare_dashboard_consolidado(consolidado)
     if dash.empty:
         st.warning("Ainda não há consolidado disponível para os parâmetros selecionados.")
@@ -5088,7 +5123,20 @@ def render_consolidado_tabs(
         "Lançamentos Manuais",
     ])
     with analitico_tab:
-        st.markdown('<div class="section-title">Consolidado por Unidade e Operadora</div>', unsafe_allow_html=True)
+        colA, colB = st.columns([8, 2])
+        with colA:
+            st.markdown('<div class="section-title">Consolidado por Unidade e Operadora</div>', unsafe_allow_html=True)
+        with colB:
+            import io
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+                filtered.to_excel(writer, index=False, sheet_name="Consolidado")
+            st.download_button(
+                "📥 Extrair para Excel",
+                data=buf.getvalue(),
+                file_name=f"Consolidado_Analitico_{year}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
         render_consolidado_inline_table(filtered, fat_months, rec_months)
         st.caption(
             f"Mostrando {len(filtered)} linhas analiticas, agrupadas por "
@@ -5102,55 +5150,7 @@ def render_consolidado_tabs(
     with manuais_tab:
         render_lancamentos_manuais_tab()
 
-def render_consolidado_analitico(consolidado: pd.DataFrame, fat_months: list[int], rec_months: list[int], base_dinamica: pd.DataFrame | None = None, year: int = 2026):
-    render_page_header("Consolidado", "Consulta analitica de faturamento e recebimentos por unidade, operadora e mes.")
-    dash = prepare_dashboard_consolidado(consolidado)
-    if dash.empty:
-        st.warning("Ainda nao ha consolidado disponivel para os parametros selecionados.")
-        return
 
-    st.markdown('<div class="filter-band-title">Filtros do consolidado</div>', unsafe_allow_html=True)
-    f1, f2, f3, f4 = st.columns([1, 1, 1.4, 0.9])
-    with f1:
-        selected_unit = st.selectbox("Unidade", ["Todas Unidades"] + sorted(dash["unidade_padrao"].dropna().unique().tolist()))
-    with f2:
-        selected_operator = st.selectbox("Operadora", ["Todas Operadoras"] + sorted(dash["operadora_padrao"].dropna().unique().tolist()))
-    with f3:
-        selected_status = st.multiselect("Status", sorted(dash["status"].dropna().unique().tolist()), placeholder="Todos")
-    with f4:
-        only_director_alerts = st.checkbox("Somente vermelhos", key="consolidado_only_director_alerts")
-
-    scoped = dash.copy()
-    if selected_unit != "Todas Unidades":
-        scoped = scoped[scoped["unidade_padrao"] == selected_unit]
-    if selected_operator != "Todas Operadoras":
-        scoped = scoped[scoped["operadora_padrao"] == selected_operator]
-    if selected_status:
-        scoped = scoped[scoped["status"].isin(selected_status)]
-
-    filtered = scoped.copy()
-    if only_director_alerts:
-        filtered = filtered[filtered["alerta_diretoria"].apply(as_bool_flag)]
-
-    if filtered.empty:
-        st.info("Nenhum registro encontrado para os filtros selecionados.")
-        return
-
-    total_fat = filtered["faturado"].sum() if "faturado" in filtered else 0
-    total_rec = filtered["total_recebido_bruto"].sum() if "total_recebido_bruto" in filtered else 0
-    total_dif = filtered["diferenca_pendente"].sum() if "diferenca_pendente" in filtered else 0
-    obs_count = int(filtered["observacoes_consolidadas"].fillna("").astype(str).str.strip().ne("").sum()) if "observacoes_consolidadas" in filtered else 0
-    alert_count = int(filtered["alerta_diretoria"].apply(as_bool_flag).sum()) if "alerta_diretoria" in filtered else 0
-
-    render_kpi_row("consolidado", [
-        {"key": "faturamento", "label": "Faturamento", "value": fmt_money(total_fat), "note": "Competencia selecionada"},
-        {"key": "recebido_bruto", "label": "Recebido bruto", "value": fmt_money(total_rec), "note": "Total recebido no recorte"},
-        {"key": "diferenca_pendente", "label": "Diferenca pendente", "value": fmt_money(total_dif), "note": "Faturamento - recebido", "alert": total_dif > 0},
-        {"key": "alertas_diretoria", "label": "Alertas vermelhos", "value": str(alert_count), "note": "Marcados para diretoria", "alert": alert_count > 0},
-        {"key": "observacoes", "label": "Observacoes", "value": str(obs_count), "note": "Registros com nota fiscal/manual"},
-    ])
-
-    render_consolidado_tabs(dash, filtered, fat_months, rec_months, int(year))
 
 def build_comentarios_grid(consolidado: pd.DataFrame, comentarios: pd.DataFrame, mes_referencia: int, ano_referencia: int) -> pd.DataFrame:
     if consolidado.empty:
@@ -5407,6 +5407,60 @@ def render_base_dinamica_editor(base: pd.DataFrame, year: int):
             mask = mask | filtered[col].fillna("").astype(str).apply(norm_text).str.contains(needle, regex=False)
         filtered = filtered[mask].copy()
 
+    dynamic_faturado = [c for c in filtered.columns if str(c).startswith("faturado_")]
+    dynamic_rec_bruto = [c for c in filtered.columns if str(c).startswith("rec_bruto_")]
+    dynamic_rec_liquido = [c for c in filtered.columns if str(c).startswith("rec_liquido_")]
+    
+    dynamic_cols = []
+    for fat in dynamic_faturado:
+        dynamic_cols.append(fat)
+    for rb in dynamic_rec_bruto:
+        dynamic_cols.append(rb)
+    for rl in dynamic_rec_liquido:
+        dynamic_cols.append(rl)
+    
+    col_order = [
+        "_row_id",
+        "linha_origem",
+        "unidade_original",
+        "unidade_padrao",
+        "operadora_original",
+        "operadora_padrao",
+        "alerta_diretoria",
+    ] + dynamic_cols + [
+        "observacao",
+        "origem_arquivo",
+        "atualizado_em",
+    ]
+    
+    col_config = {
+        "_row_id": st.column_config.NumberColumn("ID", format="%d"),
+        "linha_origem": st.column_config.NumberColumn("Linha origem", format="%d"),
+        "unidade_original": st.column_config.TextColumn("Unidade origem", required=True),
+        "unidade_padrao": st.column_config.TextColumn("Unidade padrão", required=True),
+        "operadora_original": st.column_config.TextColumn("Operadora origem", required=True),
+        "alerta_diretoria": st.column_config.CheckboxColumn("Vermelho diretoria"),
+        "operadora_padrao": st.column_config.TextColumn("Operadora padrão", required=True),
+        "observacao": st.column_config.TextColumn("Observação", width="large"),
+        "origem_arquivo": st.column_config.TextColumn("Origem"),
+        "atualizado_em": st.column_config.TextColumn("Atualizado em"),
+    }
+    
+    for c in dynamic_faturado:
+        parts = c.split("_", 1)
+        name = parts[1].capitalize() if len(parts) > 1 else c
+        col_config[c] = st.column_config.NumberColumn(f"Faturado {name}", format="R$ %.2f")
+        
+    for c in dynamic_rec_bruto:
+        parts = c.split("_", 2)
+        name = parts[2].capitalize() if len(parts) > 2 else c
+        col_config[c] = st.column_config.NumberColumn(f"Rec. Bruto {name}", format="R$ %.2f")
+        
+    for c in dynamic_rec_liquido:
+        parts = c.split("_", 2)
+        name = parts[2].capitalize() if len(parts) > 2 else c
+        col_config[c] = st.column_config.NumberColumn(f"Rec. Líquido {name}", format="R$ %.2f")
+
     edited = st.data_editor(
         filtered,
         num_rows="dynamic",
@@ -5414,46 +5468,8 @@ def render_base_dinamica_editor(base: pd.DataFrame, year: int):
         hide_index=True,
         key="base_dinamica_editor",
         disabled=["_row_id", "origem_arquivo", "atualizado_em"],
-        column_order=[
-            "_row_id",
-            "linha_origem",
-            "unidade_original",
-            "unidade_padrao",
-            "operadora_original",
-            "operadora_padrao",
-            "alerta_diretoria",
-            "faturado_marco",
-            "faturado_abril",
-            "rec_bruto_marco",
-            "rec_liquido_marco",
-            "rec_bruto_abril",
-            "rec_liquido_abril",
-            "rec_bruto_maio",
-            "rec_liquido_maio",
-            "observacao",
-            "origem_arquivo",
-            "atualizado_em",
-        ],
-        column_config={
-            "_row_id": st.column_config.NumberColumn("ID", format="%d"),
-            "linha_origem": st.column_config.NumberColumn("Linha origem", format="%d"),
-            "unidade_original": st.column_config.TextColumn("Unidade origem", required=True),
-            "unidade_padrao": st.column_config.TextColumn("Unidade padrão", required=True),
-            "operadora_original": st.column_config.TextColumn("Operadora origem", required=True),
-            "alerta_diretoria": st.column_config.CheckboxColumn("Vermelho diretoria"),
-            "operadora_padrao": st.column_config.TextColumn("Operadora padrão", required=True),
-            "faturado_marco": st.column_config.NumberColumn("Faturado Março", format="R$ %.2f"),
-            "faturado_abril": st.column_config.NumberColumn("Faturado Abril", format="R$ %.2f"),
-            "rec_bruto_marco": st.column_config.NumberColumn("Rec. Bruto Março", format="R$ %.2f"),
-            "rec_liquido_marco": st.column_config.NumberColumn("Rec. Líquido Março", format="R$ %.2f"),
-            "rec_bruto_abril": st.column_config.NumberColumn("Rec. Bruto Abril", format="R$ %.2f"),
-            "rec_liquido_abril": st.column_config.NumberColumn("Rec. Líquido Abril", format="R$ %.2f"),
-            "rec_bruto_maio": st.column_config.NumberColumn("Rec. Bruto Maio", format="R$ %.2f"),
-            "rec_liquido_maio": st.column_config.NumberColumn("Rec. Líquido Maio", format="R$ %.2f"),
-            "observacao": st.column_config.TextColumn("Observação", width="large"),
-            "origem_arquivo": st.column_config.TextColumn("Origem"),
-            "atualizado_em": st.column_config.TextColumn("Atualizado em"),
-        },
+        column_order=col_order,
+        column_config=col_config,
     )
 
     left, right = st.columns([1, 4])
