@@ -3212,14 +3212,10 @@ def save_inconsistencias_grid(edited: pd.DataFrame, manual: pd.DataFrame, usuari
     final = pd.concat([keep, save], ignore_index=True)
     write_table("inconsistencias_manuais", final)
 
-def source_values_for_depara(fat: pd.DataFrame, cont: pd.DataFrame, column: str) -> pd.Series:
-    values = []
-    for df in [fat, cont]:
-        if not df.empty and column in df:
-            values.append(df[column].dropna().astype(str))
-    if not values:
-        return pd.Series(dtype=str)
-    return pd.concat(values, ignore_index=True).map(str.strip).replace("", pd.NA).dropna()
+def source_values_for_depara(df: pd.DataFrame, column: str) -> pd.Series:
+    if not df.empty and column in df:
+        return df[column].dropna().astype(str).map(str.strip).replace("", pd.NA).dropna()
+    return pd.Series(dtype=str)
 
 def build_depara_grid(mapping: pd.DataFrame, source_values: pd.Series) -> pd.DataFrame:
     base = mapping.copy()
