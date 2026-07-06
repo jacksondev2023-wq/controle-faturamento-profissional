@@ -441,6 +441,7 @@ _KNOWN_TABLES: list[str] = [
     "de_para_unidades",
     "de_para_operadoras",
     "comentarios_manuais",
+    "lancamentos_manuais",
     "importacoes",
     "exportacoes",
     "inconsistencias_manuais",

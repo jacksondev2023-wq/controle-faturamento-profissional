@@ -1543,10 +1543,58 @@ def merge_base_dinamica(existing: pd.DataFrame, incoming: pd.DataFrame, selected
 @st.cache_data(show_spinner=False, ttl=300)
 def load_operational_tables(year: int = 2026) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     ensure_base_dinamica_table()
+    ensure_lancamentos_manuais_table()
     base = normalize_base_dinamica(read_table("base_dinamica"))
     if base.empty:
-        return read_table("faturamento"), read_table("contabilidade"), base
-    fat_generated, cont_generated = dinamica_to_raw_tables(base, year=int(year), origem="base_dinamica")
+        fat_generated, cont_generated = read_table("faturamento"), read_table("contabilidade")
+    else:
+        fat_generated, cont_generated = dinamica_to_raw_tables(base, year=int(year), origem="base_dinamica")
+    
+    # Injeta Lançamentos Manuais
+    try:
+        lanc = read_table("lancamentos_manuais")
+        if not lanc.empty:
+            lanc_year = lanc[lanc["ano_referencia"].fillna(year).astype(int) == int(year)]
+            
+            fat_manuais = lanc_year[lanc_year["tipo_lancamento"] == "Faturamento Extra"].copy()
+            if not fat_manuais.empty:
+                fat_extra = pd.DataFrame({
+                    "nf": fat_manuais["id"],
+                    "unidade_original": fat_manuais["unidade_padrao"],
+                    "unidade_padrao": fat_manuais["unidade_padrao"],
+                    "operadora_original": fat_manuais["operadora_padrao"],
+                    "operadora_padrao": fat_manuais["operadora_padrao"],
+                    "paciente": fat_manuais["motivo"],
+                    "valor_faturado": pd.to_numeric(fat_manuais["valor"], errors="coerce").fillna(0),
+                    "mes_faturamento": fat_manuais["mes_referencia"].astype(int),
+                    "ano_faturamento": fat_manuais["ano_referencia"].astype(int),
+                    "origem_arquivo": "AJUSTE_MANUAL",
+                    "fonte": "MANUAL"
+                })
+                fat_generated = pd.concat([fat_generated, fat_extra], ignore_index=True)
+                
+            cont_manuais = lanc_year[lanc_year["tipo_lancamento"] == "Recebimento Extra"].copy()
+            if not cont_manuais.empty:
+                cont_extra = pd.DataFrame({
+                    "nf": cont_manuais["id"],
+                    "unidade_original": cont_manuais["unidade_padrao"],
+                    "unidade_padrao": cont_manuais["unidade_padrao"],
+                    "operadora_original": cont_manuais["operadora_padrao"],
+                    "operadora_padrao": cont_manuais["operadora_padrao"],
+                    "valor_bruto": pd.to_numeric(cont_manuais["valor"], errors="coerce").fillna(0),
+                    "valor_liquido": pd.to_numeric(cont_manuais["valor"], errors="coerce").fillna(0),
+                    "data_pago": pd.NaT,
+                    "mes_recebimento": cont_manuais["mes_referencia"].astype(int),
+                    "ano_recebimento": cont_manuais["ano_referencia"].astype(int),
+                    "observacao_original": cont_manuais["motivo"],
+                    "observacao_fiscal": cont_manuais["motivo"],
+                    "origem_arquivo": "AJUSTE_MANUAL",
+                    "fonte": "MANUAL"
+                })
+                cont_generated = pd.concat([cont_generated, cont_extra], ignore_index=True)
+    except Exception:
+        pass
+
     return fat_generated, cont_generated, base
 
 def ensure_importacoes_table():
@@ -3953,6 +4001,24 @@ def ensure_comentarios_table():
         """
     )
 
+def ensure_lancamentos_manuais_table():
+    _db_ensure_table(
+        """
+        CREATE TABLE IF NOT EXISTS lancamentos_manuais (
+            id TEXT PRIMARY KEY,
+            unidade_padrao TEXT,
+            operadora_padrao TEXT,
+            mes_referencia INTEGER,
+            ano_referencia INTEGER,
+            tipo_lancamento TEXT,
+            valor REAL,
+            motivo TEXT,
+            atualizado_por TEXT,
+            atualizado_em TEXT
+        )
+        """
+    )
+
 def build_diferenca_unidade_summary(filtered: pd.DataFrame) -> pd.DataFrame:
     if filtered.empty:
         return pd.DataFrame()
@@ -4809,6 +4875,54 @@ def render_consolidado_analitico(consolidado: pd.DataFrame, fat_months: list[int
     render_consolidado_sheet_table(filtered, fat_months, rec_months)
     st.caption(f"Mostrando {len(filtered)} linhas analíticas, agrupadas por {filtered['unidade_padrao'].nunique()} unidades. Última sincronização: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
 
+def render_lancamentos_manuais_tab():
+    st.subheader("Ajustes e Lançamentos Manuais")
+    st.caption("Adicione valores avulsos de faturamento ou recebimento que não constam nas planilhas originais. Esses valores serão automaticamente somados aos relatórios consolidados.")
+    
+    ensure_lancamentos_manuais_table()
+    df_manuais = read_table("lancamentos_manuais")
+    if df_manuais.empty:
+        df_manuais = pd.DataFrame(columns=[
+            "id", "unidade_padrao", "operadora_padrao", "mes_referencia", "ano_referencia", 
+            "tipo_lancamento", "valor", "motivo", "atualizado_por", "atualizado_em"
+        ])
+    
+    config = {
+        "id": st.column_config.TextColumn("ID", disabled=True),
+        "unidade_padrao": st.column_config.TextColumn("Unidade (Exata)", required=True),
+        "operadora_padrao": st.column_config.TextColumn("Operadora (Exata)", required=True),
+        "mes_referencia": st.column_config.NumberColumn("Mês", min_value=1, max_value=12, step=1, required=True),
+        "ano_referencia": st.column_config.NumberColumn("Ano", min_value=2020, max_value=2100, step=1, required=True),
+        "tipo_lancamento": st.column_config.SelectboxColumn("Tipo", options=["Faturamento Extra", "Recebimento Extra"], required=True),
+        "valor": st.column_config.NumberColumn("Valor (R$)", format="R$ %.2f", required=True),
+        "motivo": st.column_config.TextColumn("Motivo/Observação", required=False),
+        "atualizado_por": st.column_config.TextColumn("Atualizado Por", disabled=True),
+        "atualizado_em": st.column_config.TextColumn("Atualizado Em", disabled=True)
+    }
+    
+    edited_df = st.data_editor(
+        df_manuais,
+        column_config=config,
+        num_rows="dynamic",
+        key="editor_manuais",
+        use_container_width=True
+    )
+    
+    if st.button("Salvar Lançamentos", type="primary"):
+        import uuid
+        now_str = datetime.now().strftime("%d/%m/%Y %H:%M")
+        
+        for idx, row in edited_df.iterrows():
+            if pd.isna(row["id"]) or not str(row["id"]).strip():
+                edited_df.at[idx, "id"] = f"MANUAL-{uuid.uuid4().hex[:8]}"
+            edited_df.at[idx, "atualizado_em"] = now_str
+            edited_df.at[idx, "atualizado_por"] = "admin"
+            
+        write_table("lancamentos_manuais", edited_df)
+        st.success("Lançamentos salvos com sucesso! Eles já estão refletidos no consolidado.")
+        clear_data_caches()
+        st.rerun()
+
 @st.fragment
 def render_consolidado_tabs(
     dash: pd.DataFrame,
@@ -4817,10 +4931,11 @@ def render_consolidado_tabs(
     rec_months: list[int],
     year: int,
 ):
-    analitico_tab, diferenca_tab, acerto_tab = st.tabs([
+    analitico_tab, diferenca_tab, acerto_tab, manuais_tab = st.tabs([
         "Analitico",
         "Consolidado da diferenca",
         "Acerto de contas",
+        "Lançamentos Manuais",
     ])
     with analitico_tab:
         st.markdown('<div class="section-title">Consolidado por Unidade e Operadora</div>', unsafe_allow_html=True)
@@ -4834,6 +4949,8 @@ def render_consolidado_tabs(
         render_diferenca_unidade_tab(filtered)
     with acerto_tab:
         render_acerto_contas_tab(dash, fat_months, int(year))
+    with manuais_tab:
+        render_lancamentos_manuais_tab()
 
 def render_consolidado_analitico(consolidado: pd.DataFrame, fat_months: list[int], rec_months: list[int], base_dinamica: pd.DataFrame | None = None, year: int = 2026):
     render_page_header("Consolidado", "Consulta analitica de faturamento e recebimentos por unidade, operadora e mes.")
