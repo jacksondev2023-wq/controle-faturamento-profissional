@@ -803,7 +803,7 @@ def build_consolidado(faturamento: pd.DataFrame, contabilidade: pd.DataFrame, fa
     if not cont.empty and not fat.empty:
         import difflib
         # Mapeia as operadoras conhecidas da contabilidade por unidade
-        cont_ops = cont.groupby('unidade_padrao')['operadora_padrao'].unique().to_dict()
+        cont_ops = cont.groupby('unidade_padrao')['operadora_padrao'].unique().apply(list).to_dict()
         
         def match_operator(row):
             u_fat = str(row['unidade_padrao']).strip()
