@@ -1833,6 +1833,21 @@ def ensure_inconsistencias_table():
         """
     )
 
+def ensure_comentarios_table():
+    _db_ensure_table(
+        """
+        CREATE TABLE IF NOT EXISTS comentarios_manuais (
+            unidade_padrao TEXT,
+            operadora_padrao TEXT,
+            mes_referencia TEXT,
+            ano_referencia TEXT,
+            comentario_manual TEXT,
+            atualizado_por TEXT,
+            atualizado_em TEXT
+        )
+        """
+    )
+
 def file_already_imported(file_hash: str, tipo_arquivo: str) -> bool:
     if not file_hash:
         return False
