@@ -407,6 +407,59 @@ export default function(component) {
                 }
 
                 td.appendChild(observationWrap);
+            } else if ((column.kind === "money" || column.kind === "fat") && isDetail) {
+                const rawValue = row.values?.[column.key] || "";
+                const display = document.createElement("span");
+                display.className = "editable-value";
+                display.textContent = rawValue;
+                display.title = "Clique para editar";
+                display.style.cursor = "pointer";
+                display.style.display = "block";
+                display.style.width = "100%";
+
+                display.addEventListener("click", () => {
+                    const input = document.createElement("input");
+                    input.type = "text";
+                    input.className = "inline-edit-input";
+                    input.value = rawValue.replace(/R\$\s?/g, "").replace(/\./g, "").replace(",", ".");
+                    input.style.width = "100%";
+                    input.style.border = "2px solid #002E7A";
+                    input.style.borderRadius = "3px";
+                    input.style.padding = "2px 4px";
+                    input.style.fontSize = "0.86rem";
+                    input.style.textAlign = "right";
+                    input.style.outline = "none";
+                    input.style.background = "#FFFFFF";
+
+                    td.replaceChildren(input);
+                    input.focus();
+                    input.select();
+
+                    function commitEdit() {
+                        const newVal = input.value.trim();
+                        const numVal = parseFloat(newVal.replace(/R\$\s?/g, "").replace(/\./g, "").replace(",", ".") || "0");
+                        const formatted = isNaN(numVal) || Math.abs(numVal) < 0.005
+                            ? ""
+                            : "R$ " + numVal.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                        display.textContent = formatted;
+                        td.replaceChildren(display);
+                        sendAction({
+                            type: "value_edit",
+                            unidade: row.unidade,
+                            operadora: row.operadora,
+                            column: column.key,
+                            value: String(numVal),
+                        });
+                    }
+
+                    input.addEventListener("blur", commitEdit);
+                    input.addEventListener("keydown", (e) => {
+                        if (e.key === "Enter") { e.preventDefault(); input.blur(); }
+                        if (e.key === "Escape") { td.replaceChildren(display); }
+                    });
+                });
+
+                td.appendChild(display);
             } else {
                 td.textContent = row.values?.[column.key] || "";
             }
