@@ -2662,7 +2662,9 @@ def build_consolidado_inline_payload(filtered: pd.DataFrame, fat_months: list[in
 
             if fresh is not None:
                 signal = normalize_director_signal(fresh.get("signal", ""))
-                observation = str(fresh.get("observation", "") or "")
+                observation = str(fresh.get("observation", "") or "").strip()
+                if not observation:
+                    observation = str(detail.get("observacoes_consolidadas", "") or "").strip()
             else:
                 signal = normalize_director_signal(detail.get("sinal_diretoria", ""))
                 observation = str(detail.get("observacoes_consolidadas", "") or "").strip()

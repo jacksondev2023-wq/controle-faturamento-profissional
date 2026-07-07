@@ -413,13 +413,19 @@ export default function(component) {
                 display.className = "editable-value";
                 display.textContent = rawValue;
                 display.title = "Clique para editar";
-                display.style.cursor = "pointer";
+                
+                td.style.cursor = "pointer";
                 display.style.display = "block";
                 display.style.width = "100%";
                 display.style.minHeight = "20px";
                 if (!rawValue) display.innerHTML = "&nbsp;";
 
-                display.addEventListener("click", () => {
+                td.appendChild(display);
+
+                td.addEventListener("click", (e) => {
+                    // Prevenir múltiplos inputs se já estiver editando
+                    if (td.querySelector("input")) return;
+
                     const input = document.createElement("input");
                     input.type = "text";
                     input.className = "inline-edit-input";
@@ -460,8 +466,6 @@ export default function(component) {
                         if (e.key === "Escape") { td.replaceChildren(display); }
                     });
                 });
-
-                td.appendChild(display);
             } else {
                 td.textContent = row.values?.[column.key] || "";
             }
