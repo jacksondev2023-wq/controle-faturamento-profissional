@@ -165,7 +165,7 @@
     input.editable-cell {
       width: 100%;
       box-sizing: border-box;
-      border: 1px dashed transparent;
+      border: none;
       background: transparent;
       font-family: inherit;
       font-size: inherit;
@@ -174,14 +174,15 @@
       padding: 0;
       margin: 0;
       outline: none;
+      -webkit-appearance: none;
+      box-shadow: none;
     }
     input.editable-cell:hover {
-      border-bottom: 1px dashed #94a3b8;
+      background: rgba(255, 255, 255, 0.4);
     }
     input.editable-cell:focus {
-      border: 1px solid #3b82f6;
-      background: #eff6ff;
-      border-radius: 2px;
+      background: #ffffff;
+      color: #000;
     }
     
     /* Hide number input spinners */
@@ -227,6 +228,17 @@
     });
 
     let renderedHtml = "";
+    
+    function parseCurrency(str) {
+        if (typeof str !== 'string') return str;
+        let s = str.replace(/[R$\s\.]/g, ''); // remove R$, spaces, and periods
+        s = s.replace(',', '.'); // comma to period
+        return parseFloat(s) || 0;
+    }
+    
+    function formatCurrency(num) {
+        return num.toLocaleString('pt-BR', {style: 'currency', currency: 'BRL'});
+    }
 
     function onRender(args) {
       const html = args.html;
@@ -237,12 +249,22 @@
         // Attach event listeners to all editable inputs
         const inputs = document.querySelectorAll("input.editable-cell");
         inputs.forEach(input => {
+          let valStr = input.value;
+          if (valStr && !valStr.includes("R$")) {
+              let num = parseFloat(valStr);
+              if (!isNaN(num)) {
+                  input.value = formatCurrency(num);
+              }
+          }
+        
           input.addEventListener("change", function(e) {
+            let num = parseCurrency(e.target.value);
             Streamlit.setComponentValue({
               id: e.target.id,
-              value: parseFloat(e.target.value) || 0
+              value: num
             });
-            // Show a visual cue that it was saved (flash green)
+            e.target.value = formatCurrency(num);
+            
             const oldBg = e.target.style.backgroundColor;
             e.target.style.backgroundColor = "#dcfce7";
             setTimeout(() => {
@@ -250,10 +272,21 @@
             }, 500);
           });
           
-          // Format on blur to show two decimal places
+          input.addEventListener("focus", function(e) {
+              let num = parseCurrency(e.target.value);
+              if (num !== 0) {
+                 e.target.value = num.toString().replace('.', ',');
+              } else {
+                 e.target.value = "";
+              }
+          });
+          
           input.addEventListener("blur", function(e) {
-             if (e.target.value) {
-                 e.target.value = parseFloat(e.target.value).toFixed(2);
+             let num = parseCurrency(e.target.value);
+             if (num !== 0) {
+                 e.target.value = formatCurrency(num);
+             } else {
+                 e.target.value = "";
              }
           });
         });

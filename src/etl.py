@@ -238,7 +238,9 @@ def parse_month_year(value, fallback_year: int = 2026) -> Tuple[Optional[int], O
                 year = 2000 + n
     return month, year or fallback_year
 
-def standardize_unit(series: pd.Series, depara: pd.DataFrame) -> pd.Series:
+def standardize_unit(series: pd.Series, depara: pd.DataFrame = None) -> pd.Series:
+    if depara is None or depara.empty or "sigla_origem" not in depara:
+        depara = DEFAULT_DEPARA.copy()
     mapping = {norm_text(k): norm_text(v) for k, v in zip(depara["sigla_origem"], depara["nome_padrao"])}
     return series.apply(lambda x: mapping.get(norm_text(x), norm_text(x)))
 
@@ -318,7 +320,7 @@ def prepare_faturamento(
     out["unidade_original"] = df[unidade]
     out["unidade_padrao"] = standardize_unit(df[unidade], depara)
     out["operadora_original"] = df[operadora]
-    out["operadora_padrao"] = standardize_operator(out["unidade_padrao"], df[operadora], depara_operadoras)
+    out["operadora_padrao"] = standardize_operator(df[unidade], df[operadora], depara_operadoras)
     out["paciente"] = df[paciente] if paciente else ""
     out["valor_faturado"] = parse_money(df[valor])
     months = df[data].apply(lambda v: parse_month_year(v, fallback_year))
@@ -822,8 +824,8 @@ def build_consolidado(faturamento: pd.DataFrame, contabilidade: pd.DataFrame, fa
                     return o_cont
                     
             # 2. Busca por similaridade aproximada
-            if ops_na_cont:
-                matches = difflib.get_close_matches(o_fat, ops_na_cont, n=1, cutoff=0.65)
+            if len(ops_na_cont) > 0:
+                matches = difflib.get_close_matches(o_fat, list(ops_na_cont), n=1, cutoff=0.7)
                 if matches:
                     return matches[0]
                     

@@ -2542,15 +2542,7 @@ def render_consolidado_sheet_table(filtered: pd.DataFrame, fat_months: list[int]
             classes = [column_css(col)]
             if col in money_cols:
                 classes.append("num")
-                if row_class.startswith("detail-row"):
-                    idx = row.get("_idx")
-                    cell_id = f"{idx}||{col}"
-                    val_str = f"{float(value or 0):.2f}"
-                    # Don't show 0.00 to make it cleaner, like money_or_blank_html
-                    if abs(float(value or 0)) < 0.005: val_str = ""
-                    content = f'<input class="editable-cell" id="{cell_id}" type="text" value="{val_str}">'
-                else:
-                    content = money_or_blank_html(value)
+                content = money_or_blank_html(value)
             elif col == "observacoes_consolidadas":
                 content = f'<span class="obs-full">{obs_text_html(value)}</span>' if str(value or "").strip() else ""
             else:
@@ -5015,6 +5007,7 @@ def render_analitico_base_editor(filtered: pd.DataFrame, base: pd.DataFrame, yea
         "alerta_diretoria",
         "faturado_marco",
         "faturado_abril",
+        "faturado_maio",
         "rec_bruto_marco",
         "rec_liquido_marco",
         "rec_bruto_abril",
@@ -5040,6 +5033,7 @@ def render_analitico_base_editor(filtered: pd.DataFrame, base: pd.DataFrame, yea
             "alerta_diretoria": st.column_config.CheckboxColumn("Vermelho"),
             "faturado_marco": st.column_config.NumberColumn("Faturado Marco", format="R$ %.2f"),
             "faturado_abril": st.column_config.NumberColumn("Faturado Abril", format="R$ %.2f"),
+            "faturado_maio": st.column_config.NumberColumn("Faturado Maio", format="R$ %.2f"),
             "rec_bruto_marco": st.column_config.NumberColumn("Rec. Bruto Marco", format="R$ %.2f"),
             "rec_liquido_marco": st.column_config.NumberColumn("Rec. Liquido Marco", format="R$ %.2f"),
             "rec_bruto_abril": st.column_config.NumberColumn("Rec. Bruto Abril", format="R$ %.2f"),
@@ -5254,7 +5248,37 @@ def render_consolidado_analitico(consolidado: pd.DataFrame, fat_months: list[int
         {"key": "observacoes", "label": "Observações", "value": str(obs_count), "note": "Registros com nota fiscal/manual"},
     ])
 
-    st.markdown('<div class="section-title">Consolidado por Unidade e Operadora</div>', unsafe_allow_html=True)
+    colA, colB = st.columns([8, 2])
+    with colA:
+        st.markdown('<div class="section-title">Consolidado por Unidade e Operadora</div>', unsafe_allow_html=True)
+    with colB:
+        import io
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+            filtered.to_excel(writer, index=False, sheet_name="Consolidado")
+            wb = writer.book
+            ws = writer.sheets["Consolidado"]
+            money_fmt = wb.add_format({"num_format": 'R$ #,##0.00', "border": 1})
+            pct_fmt = wb.add_format({"num_format": '0.00%', "border": 1})
+            header_fmt = wb.add_format({"bold": True, "font_color": "white", "bg_color": "#17365D", "border": 1})
+            
+            for col_num, value in enumerate(filtered.columns.values):
+                ws.write(0, col_num, value, header_fmt)
+                col_name = str(value).lower()
+                if "faturado" in col_name or "recebido" in col_name or "diferenca" in col_name or "valor" in col_name:
+                    ws.set_column(col_num, col_num, 18, money_fmt)
+                elif "perc" in col_name or "%" in col_name:
+                    ws.set_column(col_num, col_num, 12, pct_fmt)
+                else:
+                    ws.set_column(col_num, col_num, 30)
+
+        st.download_button(
+            "📥 Extrair para Excel",
+            data=buf.getvalue(),
+            file_name=f"Consolidado_Analitico_{year}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
     # Apply sort_order before rendering the sheet table
     work = filtered.copy()
     if sort_order == "A-Z":
