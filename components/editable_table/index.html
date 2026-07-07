@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Editable Sheet Component</title>
+  <style>
+    /* Reset and base styles */
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: "Source Sans Pro", sans-serif;
+      background: transparent;
+      color: #31333F;
+    }
+    
+    /* Table styles from the original Streamlit app */
+    
+.sheet-table {
+    width: 100%;
+    min-width: 1180px;
+    table-layout: fixed;
+    border-collapse: collapse;
+}
+.sheet-table th,
+.sheet-table td {
+    padding: 4px 6px;
+    font-size: 0.86rem;
+    line-height: 1.2;
+    border: 1px solid #e2e8f0;
+}
+.sheet-table th {
+    background-color: #f8fafc;
+    font-weight: 600;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+.sheet-table th:first-child,
+.sheet-table td:first-child {
+    width: 255px;
+}
+.sheet-table th.sheet-money-col,
+.sheet-table td.sheet-money-col {
+    width: 134px;
+}
+.sheet-table th.sheet-fat-col {
+    background: #FFC000 !important;
+    color: #000000 !important;
+    text-align: center;
+}
+.sheet-table th.sheet-obs-col {
+    background: #244392 !important;
+    color: #FFFFFF !important;
+    text-align: center;
+}
+.sheet-table td.sheet-obs-col {
+    width: 390px;
+    background: #FFF2CC !important;
+    color: #000000;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: normal;
+    vertical-align: top;
+}
+.sheet-table tr.unit-total-row td {
+    background: #DDEBF7 !important;
+    color: #001945;
+    border-top: 2px solid #2F75B5;
+    border-bottom: 1px solid #2F75B5;
+    font-weight: 900;
+}
+.sheet-table tr.detail-row td {
+    border-bottom: 1px solid #2FA8E1;
+}
+.sheet-table tr.detail-row td:first-child {
+    color: #001945;
+    font-weight: 500;
+}
+.sheet-table tr.alert-row td,
+.sheet-table tr.signal-verde td,
+.sheet-table tr.signal-amarelo td,
+.sheet-table tr.signal-vermelho td {
+    background: #FFF1F1 !important;
+}
+.sheet-table tr.signal-verde td {
+    background: #F0FFF5 !important;
+}
+.sheet-table tr.signal-amarelo td {
+    background: #FFF8E1 !important;
+}
+.sheet-table tr.signal-vermelho td {
+    background: #FFF1F1 !important;
+}
+.sheet-table tr.alert-row td:first-child,
+.sheet-table tr.signal-vermelho td:first-child {
+    background: #FF0000 !important;
+    color: #FFFFFF !important;
+    font-weight: 900;
+}
+.sheet-table tr.signal-amarelo td:first-child {
+    background: #FFC000 !important;
+    color: #11131A !important;
+    font-weight: 900;
+}
+.sheet-table tr.signal-verde td:first-child {
+    background: #00A651 !important;
+    color: #FFFFFF !important;
+    font-weight: 900;
+}
+.sheet-table tr.unit-alert-row td:first-child {
+    box-shadow: inset 5px 0 0 #FF0000;
+}
+.sheet-table tr.unit-signal-amarelo td:first-child {
+    box-shadow: inset 5px 0 0 #FFC000;
+}
+.sheet-table tr.unit-signal-verde td:first-child {
+    box-shadow: inset 5px 0 0 #00A651;
+}
+
+.sheet-row-signal-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex: 0 0 auto;
+}
+.sheet-line-cell {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-height: 22px;
+}
+.sheet-signal-dot {
+    width: 13px;
+    height: 13px;
+    display: inline-block;
+    border-radius: 999px;
+    border: 1px solid #8A91A1;
+    background: #FFFFFF;
+    opacity: 0.56;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.65);
+}
+.sheet-signal-dot.is-active {
+    opacity: 1;
+    outline: 2px solid #001F4E;
+    outline-offset: 1px;
+}
+.sheet-signal-dot.signal-dot-none {
+    background: #FFFFFF;
+}
+.sheet-signal-dot.signal-dot-verde {
+    background: #00A651;
+    border-color: #007F3E;
+}
+.sheet-signal-dot.signal-dot-amarelo {
+    background: #FFC000;
+    border-color: #B98900;
+}
+.sheet-signal-dot.signal-dot-vermelho {
+    background: #FF0000;
+    border-color: #B00000;
+}
+
+    /* Input styles for editable cells */
+    input.editable-cell {
+      width: 100%;
+      box-sizing: border-box;
+      border: 1px dashed transparent;
+      background: transparent;
+      font-family: inherit;
+      font-size: inherit;
+      text-align: right;
+      color: inherit;
+      padding: 0;
+      margin: 0;
+      outline: none;
+    }
+    input.editable-cell:hover {
+      border-bottom: 1px dashed #94a3b8;
+    }
+    input.editable-cell:focus {
+      border: 1px solid #3b82f6;
+      background: #eff6ff;
+      border-radius: 2px;
+    }
+    
+    /* Hide number input spinners */
+    input[type=number]::-webkit-inner-spin-button, 
+    input[type=number]::-webkit-outer-spin-button { 
+      -webkit-appearance: none; 
+      margin: 0; 
+    }
+    input[type=number] {
+      -moz-appearance: textfield;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  
+  <script>
+    // Streamlit Component API
+    function sendMessageToStreamlit(type, data) {
+      const outData = Object.assign({
+        isStreamlitMessage: true,
+        type: type,
+      }, data);
+      window.parent.postMessage(outData, "*");
+    }
+
+    const Streamlit = {
+      setComponentReady: function() {
+        sendMessageToStreamlit("streamlit:componentReady", {apiVersion: 1});
+      },
+      setFrameHeight: function(height) {
+        sendMessageToStreamlit("streamlit:setFrameHeight", {height: height || document.body.scrollHeight});
+      },
+      setComponentValue: function(value) {
+        sendMessageToStreamlit("streamlit:setComponentValue", {value: value});
+      }
+    };
+
+    window.addEventListener("message", function(event) {
+      if (event.data.type === "streamlit:render") {
+        onRender(event.data.args);
+      }
+    });
+
+    let renderedHtml = "";
+
+    function onRender(args) {
+      const html = args.html;
+      if (html !== renderedHtml) {
+        document.getElementById("root").innerHTML = html;
+        renderedHtml = html;
+        
+        // Attach event listeners to all editable inputs
+        const inputs = document.querySelectorAll("input.editable-cell");
+        inputs.forEach(input => {
+          input.addEventListener("change", function(e) {
+            Streamlit.setComponentValue({
+              id: e.target.id,
+              value: parseFloat(e.target.value) || 0
+            });
+            // Show a visual cue that it was saved (flash green)
+            const oldBg = e.target.style.backgroundColor;
+            e.target.style.backgroundColor = "#dcfce7";
+            setTimeout(() => {
+                e.target.style.backgroundColor = oldBg;
+            }, 500);
+          });
+          
+          // Format on blur to show two decimal places
+          input.addEventListener("blur", function(e) {
+             if (e.target.value) {
+                 e.target.value = parseFloat(e.target.value).toFixed(2);
+             }
+          });
+        });
+      }
+      // Update iframe height after render
+      setTimeout(() => {
+        Streamlit.setFrameHeight(document.getElementById("root").scrollHeight + 20);
+      }, 100);
+    }
+
+    Streamlit.setComponentReady();
+  </script>
+</body>
+</html>

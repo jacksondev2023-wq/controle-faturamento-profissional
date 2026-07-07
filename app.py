@@ -10,6 +10,8 @@ import json
 import os
 import pandas as pd
 import streamlit as st
+from components.editable_table import editable_table
+import time
 import altair as alt
 from streamlit_sortables import sort_items
 
@@ -2200,27 +2202,47 @@ def merge_manual_comments(consolidado: pd.DataFrame, ano: int, meses: list[int])
     comentarios_ref = comentarios.copy()
     comentarios_ref["mes_referencia"] = pd.to_numeric(comentarios_ref["mes_referencia"], errors="coerce").fillna(0).astype(int)
     comentarios_ref["ano_referencia"] = pd.to_numeric(comentarios_ref["ano_referencia"], errors="coerce").fillna(0).astype(int)
-    comentarios_ref = comentarios_ref[
-        (comentarios_ref["ano_referencia"] == int(ano))
-        & (comentarios_ref["mes_referencia"].isin(meses_validos))
-        & (comentarios_ref["comentario_manual"].fillna("").astype(str).str.strip() != "")
-    ].copy()
+    
+    # Filtrar vazios e ordenar do mais recente para o mais antigo
+    comentarios_ref = comentarios_ref[comentarios_ref["comentario_manual"].fillna("").astype(str).str.strip() != ""]
     if comentarios_ref.empty:
         return add_observacoes_consolidadas(out)
-
-    comentarios_ref["comentario_manual"] = comentarios_ref.apply(
-        lambda row: f"{MONTHS.get(int(row['mes_referencia']), row['mes_referencia'])}: {str(row['comentario_manual']).strip()}",
-        axis=1,
-    )
-    grouped = (
-        comentarios_ref
-        .groupby(["unidade_padrao", "operadora_padrao"], dropna=False)["comentario_manual"]
-        .apply(lambda values: " | ".join(dict.fromkeys(v for v in values if str(v).strip())))
-        .reset_index()
-    )
-    out = out.merge(grouped, on=["unidade_padrao", "operadora_padrao"], how="left", suffixes=("", "_comentado"))
+        
+    comentarios_ref = comentarios_ref.sort_values(["ano_referencia", "mes_referencia"], ascending=[False, False])
+    
+    mask_current = (comentarios_ref["ano_referencia"] == int(ano)) & (comentarios_ref["mes_referencia"].isin(meses_validos))
+    current_df = comentarios_ref[mask_current].copy()
+    historical_df = comentarios_ref[~mask_current].copy()
+    
+    grouped_current = pd.Series(dtype=str)
+    if not current_df.empty:
+        current_df["comentario_manual"] = current_df.apply(
+            lambda row: f"{MONTHS.get(int(row['mes_referencia']), row['mes_referencia'])}: {str(row['comentario_manual']).strip()}", axis=1)
+        grouped_current = current_df.groupby(["unidade_padrao", "operadora_padrao"], dropna=False)["comentario_manual"].apply(lambda vals: " | ".join(dict.fromkeys(v for v in vals if str(v).strip())))
+        
+    grouped_historical = pd.Series(dtype=str)
+    if not historical_df.empty:
+        historical_df["comentario_manual"] = historical_df.apply(
+            lambda row: f"(Herdado {MONTHS.get(int(row['mes_referencia']), row['mes_referencia'])}/{int(row['ano_referencia'])}): {str(row['comentario_manual']).strip()}", axis=1)
+        grouped_historical = historical_df.groupby(["unidade_padrao", "operadora_padrao"], dropna=False).first()["comentario_manual"]
+        
+    combined = grouped_current.copy() if not grouped_current.empty else pd.Series(dtype=str)
+    
+    if not grouped_historical.empty:
+        if combined.empty:
+            combined = grouped_historical
+        else:
+            missing = grouped_historical.index.difference(combined.index)
+            combined = pd.concat([combined, grouped_historical.loc[missing]])
+            
+    if combined.empty:
+        return add_observacoes_consolidadas(out)
+        
+    combined_df = combined.reset_index(name="comentario_manual_comentado")
+    out = out.merge(combined_df, on=["unidade_padrao", "operadora_padrao"], how="left")
     out["comentario_manual"] = out["comentario_manual_comentado"].fillna("").astype(str)
     out = out.drop(columns=["comentario_manual_comentado"])
+    
     return add_observacoes_consolidadas(out)
 
 def merge_base_dinamica_observations(consolidado: pd.DataFrame, base_dinamica: pd.DataFrame) -> pd.DataFrame:
@@ -2416,7 +2438,7 @@ def render_consolidado_pivot_table(filtered: pd.DataFrame, fat_months: list[int]
         unsafe_allow_html=True,
     )
 
-def render_consolidado_sheet_table(filtered: pd.DataFrame, fat_months: list[int], rec_months: list[int], enable_signal_actions: bool = False):
+def render_consolidado_sheet_table(filtered: pd.DataFrame, fat_months: list[int], rec_months: list[int], year: int, enable_signal_actions: bool = False):
     fat_cols = [f"fat_{month}" for month in fat_months if f"fat_{month}" in filtered]
     rec_cols = [f"rec_bruto_{month}" for month in rec_months if f"rec_bruto_{month}" in filtered]
     table_cols = ["linha_label", *fat_cols, *rec_cols, "observacoes_consolidadas"]
@@ -2468,17 +2490,9 @@ def render_consolidado_sheet_table(filtered: pd.DataFrame, fat_months: list[int]
         return f'<span class="sheet-row-signal-actions">{"".join(dots)}</span>'
 
     work = filtered.copy()
-    if "ordem_base_dinamica" not in work:
-        work["ordem_base_dinamica"] = range(1, len(work) + 1)
-    work["ordem_base_dinamica"] = pd.to_numeric(work["ordem_base_dinamica"], errors="coerce").fillna(999999)
+    # unit_order already comes sorted from the passed filtered df, so we preserve its unique order
+    unit_order = work["unidade_padrao"].drop_duplicates().tolist()
 
-    unit_order = (
-        work.groupby("unidade_padrao", dropna=False)["ordem_base_dinamica"]
-        .min()
-        .sort_values()
-        .index
-        .tolist()
-    )
 
     rows: list[tuple[str, dict]] = []
     for unidade in unit_order:
@@ -2492,8 +2506,8 @@ def render_consolidado_sheet_table(filtered: pd.DataFrame, fat_months: list[int]
         elif unit_signal:
             unit_class += f" unit-signal-{unit_signal}"
         rows.append((unit_class, unit_total_row(group, str(unidade))))
-        details = group.sort_values(["ordem_base_dinamica", "operadora_padrao"], ascending=[True, True])
-        for _, detail in details.iterrows():
+        details = group # It is already sorted correctly from the outside!
+        for idx, detail in details.iterrows():
             row = {"linha_label": str(detail.get("operadora_padrao", ""))}
             for col in money_cols:
                 row[col] = detail.get(col, "")
@@ -2503,6 +2517,9 @@ def render_consolidado_sheet_table(filtered: pd.DataFrame, fat_months: list[int]
                 signal = "vermelho"
             row["_target_key"] = norm_text(detail.get("unidade_padrao", "")) + "||" + norm_text(detail.get("operadora_padrao", ""))
             row["_signal"] = signal
+            row["_idx"] = idx
+            row["_unidade"] = str(detail.get("unidade_padrao", ""))
+            row["_operadora"] = str(detail.get("operadora_padrao", ""))
             detail_class = f"detail-row signal-{signal}" if signal else "detail-row"
             rows.append((detail_class, row))
 
@@ -2525,7 +2542,15 @@ def render_consolidado_sheet_table(filtered: pd.DataFrame, fat_months: list[int]
             classes = [column_css(col)]
             if col in money_cols:
                 classes.append("num")
-                content = money_or_blank_html(value)
+                if row_class.startswith("detail-row"):
+                    idx = row.get("_idx")
+                    cell_id = f"{idx}||{col}"
+                    val_str = f"{float(value or 0):.2f}"
+                    # Don't show 0.00 to make it cleaner, like money_or_blank_html
+                    if abs(float(value or 0)) < 0.005: val_str = ""
+                    content = f'<input class="editable-cell" id="{cell_id}" type="text" value="{val_str}">'
+                else:
+                    content = money_or_blank_html(value)
             elif col == "observacoes_consolidadas":
                 content = f'<span class="obs-full">{obs_text_html(value)}</span>' if str(value or "").strip() else ""
             else:
@@ -2708,6 +2733,7 @@ def dashboard_bar_chart_html(rec_df: pd.DataFrame) -> str:
 
 @st.cache_data(show_spinner=False)
 def df_to_excel_bytes(consolidado: pd.DataFrame, fat: pd.DataFrame, cont: pd.DataFrame, inconsistencias: pd.DataFrame) -> bytes:
+    import io
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         dashboard = pd.DataFrame({
@@ -2727,22 +2753,89 @@ def df_to_excel_bytes(consolidado: pd.DataFrame, fat: pd.DataFrame, cont: pd.Dat
             ]
         })
         dashboard.to_excel(writer, sheet_name="Dashboard", index=False, startrow=2)
-        consolidado.to_excel(writer, sheet_name="Consolidado", index=False)
+        
+        # --- Build formatted Consolidado for Excel ---
+        # Get money columns
+        money_cols = [c for c in consolidado.columns if c.startswith("fat_") or c.startswith("rec_")]
+        
+        # Create a visually grouped dataframe
+        vis_rows = []
+        if "ordem_base_dinamica" not in consolidado:
+            consolidado["ordem_base_dinamica"] = range(1, len(consolidado) + 1)
+        
+        work = consolidado.copy()
+        work["ordem_base_dinamica"] = pd.to_numeric(work["ordem_base_dinamica"], errors="coerce").fillna(999999)
+        unit_order = work.groupby("unidade_padrao", dropna=False)["ordem_base_dinamica"].min().sort_values().index.tolist()
+        
+        total_row_indices = []
+        current_idx = 1 # Header is 0
+        
+        for unidade in unit_order:
+            group = work[work["unidade_padrao"].astype(str) == str(unidade)]
+            
+            # Unit total row
+            row = {"UNIDADE / OPERADORA": str(unidade)}
+            for c in consolidado.columns:
+                if c not in ["UNIDADE / OPERADORA", "unidade_padrao", "operadora_padrao", "ordem_base_dinamica"]:
+                    if c in money_cols:
+                        row[c] = pd.to_numeric(group[c], errors="coerce").fillna(0).sum()
+                    else:
+                        row[c] = ""
+            vis_rows.append(row)
+            total_row_indices.append(current_idx)
+            current_idx += 1
+            
+            # Detail rows
+            details = group.sort_values(["ordem_base_dinamica", "operadora_padrao"])
+            for _, detail in details.iterrows():
+                d_row = {"UNIDADE / OPERADORA": str(detail.get("operadora_padrao", ""))}
+                for c in consolidado.columns:
+                    if c not in ["UNIDADE / OPERADORA", "unidade_padrao", "operadora_padrao", "ordem_base_dinamica"]:
+                        d_row[c] = detail.get(c, "")
+                vis_rows.append(d_row)
+                current_idx += 1
+                
+        consolidado_vis = pd.DataFrame(vis_rows)
+        # Drop columns that shouldn't be displayed if they exist and aren't needed
+        cols_to_drop = ["unidade_padrao", "operadora_padrao", "ordem_base_dinamica", "sinal_diretoria", "alerta_diretoria"]
+        consolidado_vis = consolidado_vis.drop(columns=[c for c in cols_to_drop if c in consolidado_vis], errors="ignore")
+        
+        # Capitalize headers for display
+        rename_dict = {}
+        for c in consolidado_vis.columns:
+            if c.startswith("fat_"):
+                month = c.split("_")[1]
+                rename_dict[c] = f"FATURADO {month.upper()}"
+            elif c.startswith("rec_bruto_"):
+                month = c.split("_")[2]
+                rename_dict[c] = f"REC. BRUTO {month.upper()}"
+            elif c.startswith("rec_liquido_"):
+                month = c.split("_")[2]
+                rename_dict[c] = f"REC. LÍQUIDO {month.upper()}"
+            elif c == "observacoes_consolidadas":
+                rename_dict[c] = "OBSERVAÇÃO"
+        consolidado_vis = consolidado_vis.rename(columns=rename_dict)
+        
+        consolidado_vis.to_excel(writer, sheet_name="Consolidado", index=False)
         fat.to_excel(writer, sheet_name="Faturamento Base", index=False)
         cont.to_excel(writer, sheet_name="Contabilidade Base", index=False)
         inconsistencias.to_excel(writer, sheet_name="Inconsistencias", index=False)
-
+        
         wb = writer.book
         money_fmt = wb.add_format({"num_format": 'R$ #,##0.00', "border": 1})
-        faturamento_money_fmt = wb.add_format({"num_format": 'R$ #,##0.00', "border": 1, "bg_color": "#EAF1FF", "font_color": "#001945", "bold": True})
+        faturamento_money_fmt = wb.add_format({"num_format": 'R$ #,##0.00', "border": 1, "bg_color": "#FFF2CC", "font_color": "#000000"})
         pct_fmt = wb.add_format({"num_format": '0.00%', "border": 1})
         header_fmt = wb.add_format({"bold": True, "font_color": "white", "bg_color": "#17365D", "border": 1})
-        faturamento_header_fmt = wb.add_format({"bold": True, "font_color": "white", "bg_color": "#001945", "border": 1, "bottom": 3, "bottom_color": "#C10007"})
+        faturamento_header_fmt = wb.add_format({"bold": True, "font_color": "#000000", "bg_color": "#FFC000", "border": 1})
         title_fmt = wb.add_format({"bold": True, "font_size": 16, "font_color": "#17365D"})
-
+        
+        # Formats for unit total row
+        unit_total_fmt = wb.add_format({"bold": True, "bg_color": "#DDEBF7", "border": 1, "top": 2, "bottom": 2})
+        unit_total_money_fmt = wb.add_format({"bold": True, "bg_color": "#DDEBF7", "border": 1, "top": 2, "bottom": 2, "num_format": 'R$ #,##0.00'})
+        
         for sheet_name, df in [
             ("Dashboard", dashboard),
-            ("Consolidado", consolidado),
+            ("Consolidado", consolidado_vis),
             ("Faturamento Base", fat),
             ("Contabilidade Base", cont),
             ("Inconsistencias", inconsistencias),
@@ -2756,22 +2849,36 @@ def df_to_excel_bytes(consolidado: pd.DataFrame, fat: pd.DataFrame, cont: pd.Dat
             else:
                 for col_num, col_name in enumerate(df.columns):
                     col_key = str(col_name).lower()
-                    is_faturamento = "faturado" in col_key or "faturamento" in col_key
+                    is_faturamento = "faturado" in col_key or "faturamento" in col_key or "fat_" in col_key
                     ws.write(0, col_num, col_name, faturamento_header_fmt if is_faturamento else header_fmt)
-                    width = min(max(len(str(col_name)) + 2, 12), 38)
+                    width = min(max(len(str(col_name)) + 2, 12), 48)
+                    if col_name == "UNIDADE / OPERADORA": width = 35
+                    if col_name == "OBSERVAÇÃO" or "obs" in col_key: width = 50
                     ws.set_column(col_num, col_num, width)
-            if not df.empty:
-                for idx, col in enumerate(df.columns):
-                    c = str(col).lower()
-                    is_faturamento = "faturado" in c or "faturamento" in c
-                    if any(k in c for k in ["valor", "faturado", "recebido", "diferenca", "rec_bruto", "rec_liquido", "bruto", "liquido"]):
-                        ws.set_column(idx, idx, 18, faturamento_money_fmt if is_faturamento else money_fmt)
-                    elif "perc" in c or "%" in c:
-                        ws.set_column(idx, idx, 14, pct_fmt)
-
-    output.seek(0)
-    return output.read()
-
+                    
+                if not df.empty:
+                    for idx, col in enumerate(df.columns):
+                        c = str(col).lower()
+                        is_faturamento = "faturado" in c or "faturamento" in c or "fat_" in c
+                        is_money = any(k in c for k in ["valor", "faturado", "recebido", "diferenca", "rec_bruto", "rec_liquido", "bruto", "liquido", "fat_"])
+                        
+                        if is_money:
+                            ws.set_column(idx, idx, 18, faturamento_money_fmt if is_faturamento else money_fmt)
+                        elif "perc" in c or "%" in c:
+                            ws.set_column(idx, idx, 14, pct_fmt)
+                            
+                # Apply row formatting for Consolidado
+                if sheet_name == "Consolidado":
+                    for row_idx in total_row_indices:
+                        for col_num, col_name in enumerate(df.columns):
+                            c = str(col_name).lower()
+                            is_money = any(k in c for k in ["valor", "faturado", "recebido", "diferenca", "rec_bruto", "rec_liquido", "bruto", "liquido", "fat_"])
+                            val = df.iloc[row_idx - 1, col_num]
+                            if pd.isna(val): val = ""
+                            ws.write(row_idx, col_num, val, unit_total_money_fmt if is_money else unit_total_fmt)
+                            
+        output.seek(0)
+        return output.read()
 def months_to_label(months: list[int], year: int) -> str:
     if not months:
         return "-"
@@ -3330,6 +3437,95 @@ def build_depara_operadoras_grid(mapping: pd.DataFrame, source_values: pd.DataFr
         .drop(columns="_ordem")
         .reset_index(drop=True)
     )
+
+
+def find_mapping_gaps(fat_df, cont_df):
+    if fat_df.empty or cont_df.empty:
+        import pandas as pd
+        return pd.DataFrame()
+        
+    ops_cont = set(cont_df['operadora_padrao'].dropna().apply(norm_text))
+    mask = ~fat_df['operadora_padrao'].apply(norm_text).isin(ops_cont) & fat_df['operadora_padrao'].notna() & (fat_df['operadora_padrao'] != "")
+    
+    gaps = fat_df[mask][['unidade_original', 'operadora_original', 'operadora_padrao']].drop_duplicates()
+    return gaps.reset_index(drop=True)
+
+def apply_gap_fixes_and_reprocess(fixes):
+    import pandas as pd
+    if fixes.empty:
+        return
+        
+    current_depara = read_table("de_para_operadoras_fat")
+    new_rules = fixes.rename(columns={
+        "unidade_original": "unidade_origem",
+        "operadora_original": "sigla_origem",
+        "operadora_correta": "nome_padrao"
+    })
+    
+    final_depara = pd.concat([current_depara, new_rules], ignore_index=True)
+    final_depara["_key"] = final_depara["unidade_origem"].apply(norm_text) + "|" + final_depara["sigla_origem"].apply(norm_text)
+    final_depara = final_depara.drop_duplicates(subset="_key", keep="last").drop(columns="_key")
+    write_table("de_para_operadoras_fat", final_depara)
+    
+    fat_df = read_table("faturamento")
+    if not fat_df.empty:
+        from src.etl import standardize_operator
+        fat_df["operadora_padrao"] = standardize_operator(
+            fat_df["unidade_original"],
+            fat_df["operadora_original"],
+            depara=final_depara
+        )
+        write_table("faturamento", fat_df)
+    clear_data_caches()
+
+def render_gap_manager():
+    st.subheader("Análise de Gaps (Faturamento vs Recebido)")
+    st.markdown("Mapeie as operadoras que estão no Faturamento mas não foram encontradas na Contabilidade. Ao salvar, o histórico de Faturamento será atualizado automaticamente.")
+    
+    fat_df = read_table("faturamento")
+    cont_df = read_table("contabilidade")
+    
+    gaps = find_mapping_gaps(fat_df, cont_df)
+    
+    if gaps.empty:
+        st.success("Não há gaps de mapeamento. Todas as operadoras do Faturamento coincidem com o Recebido!")
+        return
+        
+    st.warning(f"Foram encontrados {len(gaps)} mapeamentos sem correspondência na Contabilidade.")
+    
+    ops_cont_list = [""] + sorted(list(cont_df['operadora_padrao'].dropna().unique()))
+    
+    with st.form("gap_mapping_form"):
+        grid_data = gaps.copy()
+        grid_data["operadora_correta"] = ""
+        
+        edited = st.data_editor(
+            grid_data,
+            column_config={
+                "unidade_original": st.column_config.TextColumn("Unidade Orig. (Fat)", disabled=True),
+                "operadora_original": st.column_config.TextColumn("Operadora Orig. (Fat)", disabled=True),
+                "operadora_padrao": st.column_config.TextColumn("Padrão Atual (Fat)", disabled=True),
+                "operadora_correta": st.column_config.SelectboxColumn(
+                    "Mapear para (Recebido)",
+                    help="Selecione a operadora correta da Contabilidade",
+                    options=ops_cont_list,
+                    required=False
+                )
+            },
+            hide_index=True,
+            use_container_width=True,
+            num_rows="fixed"
+        )
+        
+        if st.form_submit_button("Salvar Mapeamentos e Reprocessar Histórico", type="primary"):
+            to_fix = edited[edited["operadora_correta"].str.strip() != ""]
+            if not to_fix.empty:
+                with st.spinner("Reprocessando o histórico de faturamento com as novas regras..."):
+                    apply_gap_fixes_and_reprocess(to_fix)
+                st.success(f"{len(to_fix)} regras salvas e histórico reprocessado!")
+                st.rerun()
+            else:
+                st.info("Nenhum mapeamento preenchido.")
 
 def render_depara_operadoras_manager(
     title: str,
@@ -5018,7 +5214,7 @@ def render_consolidado_analitico(consolidado: pd.DataFrame, fat_months: list[int
         return
 
     st.markdown('<div class="filter-band-title">Filtros do consolidado</div>', unsafe_allow_html=True)
-    f1, f2, f3, f4 = st.columns([1, 1, 1.4, 0.9])
+    f1, f2, f3, f4, f5 = st.columns([1, 1, 1.2, 0.8, 0.8])
     with f1:
         selected_unit = st.selectbox("Unidade", ["Todas Unidades"] + sorted(dash["unidade_padrao"].dropna().unique().tolist()))
     with f2:
@@ -5027,6 +5223,8 @@ def render_consolidado_analitico(consolidado: pd.DataFrame, fat_months: list[int
         selected_status = st.multiselect("Status", sorted(dash["status"].dropna().unique().tolist()), placeholder="Todos")
     with f4:
         only_director_alerts = st.checkbox("Somente vermelhos", key="consolidado_only_director_alerts")
+    with f5:
+        sort_order = st.selectbox("Ordem (A-Z)", ["Padrão", "A-Z", "Z-A"])
 
     scoped = dash.copy()
     if selected_unit != "Todas Unidades":
@@ -5057,8 +5255,20 @@ def render_consolidado_analitico(consolidado: pd.DataFrame, fat_months: list[int
     ])
 
     st.markdown('<div class="section-title">Consolidado por Unidade e Operadora</div>', unsafe_allow_html=True)
-    render_consolidado_sheet_table(filtered, fat_months, rec_months)
-    st.caption(f"Mostrando {len(filtered)} linhas analíticas, agrupadas por {filtered['unidade_padrao'].nunique()} unidades. Última sincronização: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+    # Apply sort_order before rendering the sheet table
+    work = filtered.copy()
+    if sort_order == "A-Z":
+        work = work.sort_values(["unidade_padrao", "operadora_padrao"], ascending=[True, True])
+    elif sort_order == "Z-A":
+        work = work.sort_values(["unidade_padrao", "operadora_padrao"], ascending=[False, True])
+    else:
+        if "ordem_base_dinamica" not in work:
+            work["ordem_base_dinamica"] = range(1, len(work) + 1)
+        work["ordem_base_dinamica"] = pd.to_numeric(work["ordem_base_dinamica"], errors="coerce").fillna(999999)
+        work = work.sort_values(["ordem_base_dinamica", "operadora_padrao"], ascending=[True, True])
+    
+    render_consolidado_sheet_table(work, fat_months, rec_months, int(year))
+    st.caption(f"Mostrando {len(work)} linhas analíticas, agrupadas por {work['unidade_padrao'].nunique()} unidades. Última sincronização: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
 
 def render_lancamentos_manuais_tab():
     st.subheader("Ajustes e Lançamentos Manuais")
@@ -5902,6 +6112,8 @@ elif current_page == "DE/PARA":
             table_name="de_para_operadoras_fat",
             key_prefix="depara_ops_fat",
         )
+    with depara_gaps_tab:
+        render_gap_manager()
     with depara_units_cont_tab:
         render_depara_manager(
             title="DE/PARA de Unidades (Recebimento)",
@@ -5978,3 +6190,4 @@ Este projeto já vem com:
 
 Ponto importante: quando a `base_dinamica` estiver carregada, ela passa a ser a fonte principal do sistema. Os totais da planilha não são usados; o app recalcula faturamento, recebimentos, diferenças e percentuais.
 """)
+
