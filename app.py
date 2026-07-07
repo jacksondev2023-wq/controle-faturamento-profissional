@@ -1398,6 +1398,98 @@ DIRECTOR_SIGNAL_QUERY_KEY = "signal_key"
 DIRECTOR_SIGNAL_QUERY_VALUE = "signal"
 CONSOLIDADO_INLINE_COMPONENT_KEY = "consolidado_inline_table"
 
+def persist_consolidado_inline_action(action: dict | None):
+    """Callback triggered by the consolidado_inline_table JS component.
+    Handles 'signal', 'observation', and 'value_edit' action types,
+    persisting changes to base_dinamica and clearing caches."""
+    if not action or not isinstance(action, dict):
+        return
+    action_type = action.get("type", "")
+    unidade = str(action.get("unidade", "")).strip()
+    operadora = str(action.get("operadora", "")).strip()
+    value = action.get("value", "")
+    if not unidade or not operadora:
+        return
+
+    try:
+        base = read_table("base_dinamica")
+        if base.empty:
+            return
+        for c in ["sinal_diretoria", "alerta_diretoria", "observacao_fiscal"]:
+            if c not in base.columns:
+                base[c] = "" if c != "alerta_diretoria" else 0
+        mask = (
+            (base["unidade_padrao"].apply(norm_text) == norm_text(unidade))
+            & (base["operadora_padrao"].apply(norm_text) == norm_text(operadora))
+        )
+        if not mask.any():
+            return
+
+        if action_type == "signal":
+            base.loc[mask, "sinal_diretoria"] = str(value)
+            if str(value) == "vermelho":
+                base.loc[mask, "alerta_diretoria"] = 1
+            elif str(value) == "":
+                base.loc[mask, "alerta_diretoria"] = 0
+        elif action_type == "observation":
+            base.loc[mask, "observacao_fiscal"] = str(value)
+        elif action_type == "value_edit":
+            col_key = str(action.get("column", ""))
+            if col_key and col_key in base.columns:
+                try:
+                    numeric_val = float(str(value).replace("R$", "").replace(".", "").replace(",", ".").strip() or 0)
+                    base.loc[mask, col_key] = numeric_val
+                    
+                    # Atualiza diretamente a tabela operacional
+                    if col_key.startswith("fat_"):
+                        month = int(col_key.split("_")[1])
+                        fat_df = read_table("faturamento")
+                        fat_mask = (fat_df["unidade_padrao"].apply(norm_text) == norm_text(unidade)) & \
+                                   (fat_df["operadora_padrao"].apply(norm_text) == norm_text(operadora)) & \
+                                   (fat_df["mes_faturamento"] == month)
+                        if fat_mask.any():
+                            fat_df.loc[fat_mask, "valor_faturado"] = numeric_val
+                        else:
+                            new_fat = pd.DataFrame([{
+                                "nf": f"INLINE-FAT-{month:02d}", "unidade_original": unidade, "unidade_padrao": unidade,
+                                "operadora_original": operadora, "operadora_padrao": operadora, "paciente": "",
+                                "valor_faturado": numeric_val, "mes_faturamento": month, "ano_faturamento": 2026,
+                                "origem_arquivo": "EDICAO_INLINE", "fonte": "MANUAL"
+                            }])
+                            fat_df = pd.concat([fat_df, new_fat], ignore_index=True)
+                        write_table("faturamento", fat_df)
+                        
+                    elif col_key.startswith("rec_bruto_") or col_key.startswith("rec_liquido_"):
+                        month = int(col_key.split("_")[-1])
+                        is_bruto = "bruto" in col_key
+                        cont_df = read_table("contabilidade")
+                        cont_mask = (cont_df["unidade_padrao"].apply(norm_text) == norm_text(unidade)) & \
+                                    (cont_df["operadora_padrao"].apply(norm_text) == norm_text(operadora)) & \
+                                    (cont_df["mes_recebimento"] == month)
+                        if cont_mask.any():
+                            cont_df.loc[cont_mask, "valor_bruto" if is_bruto else "valor_liquido"] = numeric_val
+                        else:
+                            new_cont = pd.DataFrame([{
+                                "nf": f"INLINE-REC-{month:02d}", "unidade_original": unidade, "unidade_padrao": unidade,
+                                "operadora_original": operadora, "operadora_padrao": operadora,
+                                "valor_bruto": numeric_val if is_bruto else 0,
+                                "valor_liquido": numeric_val if not is_bruto else 0,
+                                "data_pago": pd.NaT, "mes_recebimento": month, "ano_recebimento": 2026,
+                                "observacao_original": "", "observacao_fiscal": "",
+                                "origem_arquivo": "EDICAO_INLINE", "fonte": "MANUAL"
+                            }])
+                            cont_df = pd.concat([cont_df, new_cont], ignore_index=True)
+                        write_table("contabilidade", cont_df)
+                except (ValueError, TypeError):
+                    pass
+
+        base["atualizado_em"] = datetime.now().strftime("%d/%m/%Y %H:%M")
+        write_table("base_dinamica", base)
+        clear_data_caches()
+    except Exception as exc:
+        st.session_state["consolidado_inline_error"] = f"Erro ao salvar: {exc}"
+
+
 def normalize_director_signal(value) -> str:
     key = norm_text(value)
     if key in DIRECTOR_SIGNAL_VALUES:
@@ -2593,7 +2685,7 @@ def build_consolidado_inline_payload(filtered: pd.DataFrame, fat_months: list[in
         "kind": "observation",
     })
 
-    fresh_base = normalize_base_dinamica(read_table("base_dinamica"))
+    fresh_base = read_table("base_dinamica")
     fresh_lookup: dict[str, dict] = {}
     if not fresh_base.empty:
         fresh_base = fresh_base.copy()
@@ -2602,14 +2694,19 @@ def build_consolidado_inline_payload(filtered: pd.DataFrame, fat_months: list[in
             + "||"
             + fresh_base["operadora_padrao"].apply(norm_text)
         )
+        obs_col = "observacao_fiscal" if "observacao_fiscal" in fresh_base.columns else "observacao" if "observacao" in fresh_base.columns else None
+        sig_col = "sinal_diretoria" if "sinal_diretoria" in fresh_base.columns else None
         for key, group in fresh_base.groupby("_key", dropna=False):
-            observations = [
-                str(value).strip()
-                for value in group["observacao"].fillna("").astype(str)
-                if str(value).strip()
-            ]
+            observations = []
+            if obs_col:
+                observations = [
+                    str(value).strip()
+                    for value in group[obs_col].fillna("").astype(str)
+                    if str(value).strip()
+                ]
+            signal = aggregate_director_signal(group[sig_col]) if sig_col else ""
             fresh_lookup[str(key)] = {
-                "signal": aggregate_director_signal(group["sinal_diretoria"]),
+                "signal": signal,
                 "observation": " | ".join(dict.fromkeys(observations)),
             }
 
@@ -3684,1600 +3781,13 @@ def render_depara_manager(
                 st.success("DE/PARA salvo.")
                 st.rerun()
         with col_btn2:
-            import io
-            buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
-                mapping.to_excel(writer, index=False, sheet_name="DE_PARA")
+            excel_bytes = inline_consolidado_excel_bytes(filtered)
             st.download_button(
-                "Extrair para Excel",
-                data=buf.getvalue(),
-                file_name=f"{table_name}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key=f"{key_prefix}_export_excel"
+                "📥 Extrair para Excel",
+                data=excel_bytes,
+                file_name=f"Consolidado_Analitico_{year}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-    with right:
-        st.caption(f"Mostrando {len(filtered)} de {len(grid)} registros.")
-
-def count_inconsistencias(df: pd.DataFrame, tipo: str) -> int:
-    if df.empty or "tipo" not in df or "qtd" not in df:
-        return 0
-    return int(df.loc[df["tipo"] == tipo, "qtd"].sum())
-
-def render_inconsistencias(inc: pd.DataFrame):
-    ensure_inconsistencias_table()
-    manual = read_table("inconsistencias_manuais")
-    inc = merge_inconsistencias_manuais(inc, manual)
-
-    render_page_header(
-        "Inconsistências Identificadas",
-        "Auditoria automatizada de dados carregados e mapeamentos DE/PARA pendentes.",
-    )
-
-    c1, c2, c3, c4, c5 = st.columns(5)
-    with c1:
-        render_issue_card("Unidades sem DE/PARA", count_inconsistencias(inc, "DE/PARA Unidade"), "CRÍTICO", "issue-card-critical")
-    with c2:
-        render_issue_card("Operadoras sem DE/PARA", count_inconsistencias(inc, "DE/PARA Operadora"), "CRÍTICO", "issue-card-critical")
-    with c3:
-        render_issue_card("Arquivos duplicados", count_inconsistencias(inc, "Arquivo Duplicado"), "ALTO", "issue-card-high")
-    with c4:
-        render_issue_card("Linhas zeradas", count_inconsistencias(inc, "Linha Zerada"), "MÉDIO", "issue-card-medium")
-    with c5:
-        render_issue_card("Chaves incompatíveis", count_inconsistencias(inc, "Chave Incompatível"), "BAIXA", "issue-card-low")
-
-    st.divider()
-    st.markdown('<div class="table-panel">', unsafe_allow_html=True)
-    top_left, top_right = st.columns([2, 1])
-    with top_left:
-        st.markdown('<div class="section-title" style="padding: 18px 20px 0 20px;">Registro de Auditoria</div>', unsafe_allow_html=True)
-    with top_right:
-        query = st.text_input("Buscar inconsistência", placeholder="Buscar por origem...", label_visibility="collapsed")
-    f1, f2 = st.columns([1, 1])
-    severidades = ["Todas"] + sorted(inc["severidade"].dropna().unique().tolist()) if not inc.empty else ["Todas"]
-    status_options = ["Todos"] + sorted(inc["status"].dropna().unique().tolist()) if not inc.empty else ["Todos"]
-    with f1:
-        selected_severity = st.selectbox("Severidade", severidades)
-    with f2:
-        selected_status = st.selectbox("Status", status_options)
-
-    filtered = inc.copy()
-    if selected_severity != "Todas":
-        filtered = filtered[filtered["severidade"] == selected_severity]
-    if selected_status != "Todos":
-        filtered = filtered[filtered["status"] == selected_status]
-    if query:
-        needle = norm_text(query)
-        search_cols = ["tipo", "origem", "descricao", "valor_encontrado", "acao_recomendada", "status", "observacao_manual"]
-        mask = pd.Series(False, index=filtered.index)
-        for col in search_cols:
-            if col in filtered:
-                mask = mask | filtered[col].fillna("").astype(str).apply(norm_text).str.contains(needle, regex=False)
-        filtered = filtered[mask]
-
-    if filtered.empty:
-        st.success("Nenhuma inconsistência encontrada para os filtros selecionados.")
-        st.markdown("</div>", unsafe_allow_html=True)
-        return
-
-    severity_order = {"Crítica": 0, "Alta": 1, "Média": 2, "Baixa": 3}
-    filtered = (
-        filtered.assign(_ordem=filtered["severidade"].map(severity_order).fillna(9))
-        .sort_values(["_ordem", "tipo", "origem"])
-        .drop(columns="_ordem")
-    )
-    user = st.text_input("Responsável pela atualização", value="sistema", key="inconsistencias_usuario")
-    editable = filtered.copy()
-    edited = st.data_editor(
-        editable,
-        width="stretch",
-        hide_index=True,
-        key="inconsistencias_editor",
-        disabled=[
-            "inconsistencia_id", "severidade", "tipo", "origem", "descricao",
-            "valor_encontrado", "qtd", "atualizado_por", "atualizado_em",
-        ],
-        column_order=[
-            "inconsistencia_id",
-            "severidade",
-            "tipo",
-            "origem",
-            "descricao",
-            "valor_encontrado",
-            "acao_recomendada",
-            "status",
-            "observacao_manual",
-            "atualizado_por",
-            "atualizado_em",
-            "qtd",
-        ],
-        column_config={
-            "inconsistencia_id": st.column_config.TextColumn("ID"),
-            "severidade": st.column_config.TextColumn("Severidade"),
-            "tipo": st.column_config.TextColumn("Tipo"),
-            "origem": st.column_config.TextColumn("Origem"),
-            "descricao": st.column_config.TextColumn("Descrição"),
-            "valor_encontrado": st.column_config.TextColumn("Valor encontrado"),
-            "acao_recomendada": st.column_config.TextColumn("Ação recomendada"),
-            "status": st.column_config.SelectboxColumn(
-                "Status",
-                options=["Pendente", "A revisar", "Em tratamento", "Resolvido", "Ignorado", "Informativo"],
-            ),
-            "observacao_manual": st.column_config.TextColumn("Observação manual", width="large"),
-            "atualizado_por": st.column_config.TextColumn("Atualizado por"),
-            "atualizado_em": st.column_config.TextColumn("Atualizado em"),
-            "qtd": st.column_config.NumberColumn("Qtd.", format="%d"),
-        },
-    )
-    left, right = st.columns([1, 4])
-    with left:
-        if st.button("Salvar auditoria", type="primary", key="salvar_inconsistencias"):
-            save_inconsistencias_grid(edited, manual, user)
-            st.success("Inconsistências atualizadas.")
-            st.rerun()
-    with right:
-        st.caption("Edite status, ação recomendada e observação manual. Os demais campos são gerados automaticamente pela auditoria.")
-    st.caption(f"Mostrando {len(filtered)} de {len(inc)} registros de auditoria.")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-def count_quality_warnings(df: pd.DataFrame, value_cols: list[str], month_cols: list[str]) -> int:
-    warnings = 0
-    for col in value_cols:
-        if col in df:
-            warnings += int((pd.to_numeric(df[col], errors="coerce").fillna(0) == 0).sum())
-    for col in month_cols:
-        if col in df:
-            months = pd.to_numeric(df[col], errors="coerce")
-            warnings += int((months.isna() | ~months.between(1, 12)).sum())
-    return warnings
-
-def process_import_file(tipo: str, uploaded_file, year: int, depara: pd.DataFrame, depara_operadoras: pd.DataFrame) -> tuple[bool, str]:
-    file_hash = ""
-    try:
-        raw, file_hash = read_upload_dataframe(uploaded_file)
-        if file_already_imported(file_hash, tipo):
-            register_importacao(
-                tipo,
-                uploaded_file.name,
-                "-",
-                len(raw),
-                "Duplicidade detectada",
-                "Arquivo não processado porque o mesmo conteúdo já consta no histórico.",
-                file_hash,
-            )
-            return False, "Duplicidade detectada. O arquivo não foi importado novamente."
-
-        if tipo == "Faturamento IW":
-            processed = prepare_faturamento(raw, depara, depara_operadoras=depara_operadoras, fallback_year=int(year), origem=uploaded_file.name)
-            atual = read_table("faturamento")
-            final = pd.concat([atual, processed], ignore_index=True) if not atual.empty else processed
-            write_table("faturamento", final)
-            period = identify_period_label(processed, "mes_faturamento", "ano_faturamento")
-            warning_count = count_quality_warnings(processed, ["valor_faturado"], ["mes_faturamento"])
-        else:
-            processed = prepare_contabilidade(raw, depara, depara_operadoras=depara_operadoras, fallback_year=int(year), origem=uploaded_file.name)
-            atual = read_table("contabilidade")
-            final = pd.concat([atual, processed], ignore_index=True) if not atual.empty else processed
-            write_table("contabilidade", final)
-            period = identify_period_label(processed, "mes_recebimento", "ano_recebimento")
-            warning_count = count_quality_warnings(processed, ["valor_bruto", "valor_liquido"], ["mes_recebimento"])
-
-        status = "Importado com avisos" if warning_count else "Importado com sucesso"
-        details = f"{warning_count} aviso(s) de qualidade identificados." if warning_count else "Arquivo processado sem avisos críticos."
-        register_importacao(tipo, uploaded_file.name, period, len(processed), status, details, file_hash)
-        return True, f"{tipo} importado: {len(processed)} linhas. {details}"
-    except Exception as exc:
-        register_importacao(
-            tipo,
-            getattr(uploaded_file, "name", "Arquivo sem nome"),
-            "-",
-            0,
-            "Erro de estrutura",
-            str(exc),
-            file_hash,
-        )
-        return False, f"Erro ao processar {tipo}: {exc}"
-
-DINAMICA_IMPORT_LABELS = {
-    "faturado_marco": "Faturamento Março",
-    "faturado_abril": "Faturamento Abril",
-    "rec_bruto_marco": "Recebido Bruto Março",
-    "rec_liquido_marco": "Recebido Líquido Março",
-    "rec_bruto_abril": "Recebido Bruto Abril",
-    "rec_liquido_abril": "Recebido Líquido Abril",
-    "rec_bruto_maio": "Recebido Bruto Maio",
-    "alerta_diretoria": "Alerta vermelho diretoria",
-    "rec_liquido_maio": "Recebido Líquido Maio",
-    "observacao": "Observações",
-}
-
-def detected_dinamica_columns(base: pd.DataFrame) -> list[str]:
-    detected = []
-    for col in DINAMICA_IMPORT_LABELS:
-        if col not in base:
-            continue
-        if col == "observacao":
-            if base[col].fillna("").astype(str).str.strip().ne("").any():
-                detected.append(col)
-        elif pd.to_numeric(base[col], errors="coerce").fillna(0).abs().sum() > 0:
-            detected.append(col)
-    return detected
-
-def process_dinamica_upload(uploaded_file, year: int, mode: str, selected_columns: list[str]) -> tuple[bool, str]:
-    file_hash = ""
-    tipo = "Base consolidada DINAMICA"
-    try:
-        data = uploaded_file.getvalue()
-        file_hash = hashlib.sha256(data).hexdigest()
-        base = parse_dinamica_workbook(io.BytesIO(data), origem=uploaded_file.name)
-        if mode == "Complementar base atual":
-            base = merge_base_dinamica(read_table("base_dinamica"), base, selected_columns, uploaded_file.name)
-        else:
-            keep_cols = set(selected_columns) | {"linha_origem", "unidade_original", "unidade_padrao", "operadora_original", "operadora_padrao", "origem_arquivo", "atualizado_em"}
-            for col in DINAMICA_COLUMNS:
-                if col not in keep_cols:
-                    base[col] = "" if col in {"observacao", "origem_arquivo", "atualizado_em"} else 0
-        base, fat_generated, cont_generated = replace_base_dinamica(base, uploaded_file.name, year=int(year))
-        register_importacao(
-            tipo,
-            uploaded_file.name,
-            "Fat: Mar/Abr/2026 | Rec: Abr/Mai/2026",
-            len(base),
-            "Base substituída",
-            f"Base dinâmica importada. {len(fat_generated)} linhas de faturamento e {len(cont_generated)} linhas de recebimento geradas pelo sistema.",
-            file_hash,
-        )
-        st.cache_data.clear()
-        action = "complementada" if mode == "Complementar base atual" else "substituída"
-        return True, f"Base {action} com {len(base)} linhas de unidade/operadora. Totais recalculados pelo sistema."
-    except Exception as exc:
-        register_importacao(
-            tipo,
-            getattr(uploaded_file, "name", "Arquivo sem nome"),
-            "-",
-            0,
-            "Erro de estrutura",
-            str(exc),
-            file_hash,
-        )
-        return False, f"Erro ao processar a aba DINAMICA: {exc}"
-
-def render_field_chips(fields: list[str]):
-    st.markdown("".join([f'<span class="field-chip">{field}</span>' for field in fields]), unsafe_allow_html=True)
-
-def render_dynamic_base_import_panel(year: int):
-    st.markdown(
-        """
-        <div class="upload-panel">
-            <h4>Base Consolidada DINAMICA</h4>
-            <div class="small-muted">Substitui toda a base atual a partir da aba DINAMICA. Linhas de total/subtotal da planilha são ignoradas.</div>
-            <div style="height: 10px"></div>
-            <div class="small-muted"><strong>Campos esperados</strong></div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    render_field_chips([
-        "UNIDADES X OPERADORA",
-        "Faturado Março",
-        "Faturado Abril",
-        "Rec. Bruto Março",
-        "Rec. Líquido Março",
-        "Rec. Bruto Abr",
-        "Rec. Líquido Abr",
-        "Rec. Bruto Mai",
-        "Alerta vermelho",
-        "Rec. Líquido Mai",
-        "Observação",
-    ])
-    uploaded = st.file_uploader(
-        "Upload da base DINAMICA",
-        type=["xlsx"],
-        key="dinamica_upload",
-        label_visibility="collapsed",
-    )
-    if uploaded:
-        st.caption(f"Arquivo selecionado: `{uploaded.name}`")
-        try:
-            preview_base = parse_dinamica_workbook(io.BytesIO(uploaded.getvalue()), origem=uploaded.name)
-            detected = detected_dinamica_columns(preview_base)
-            st.caption(f"{len(preview_base)} linhas analíticas detectadas. Colunas detectadas: {', '.join(DINAMICA_IMPORT_LABELS[c] for c in detected) or 'nenhuma'}")
-        except Exception as exc:
-            preview_base = pd.DataFrame()
-            detected = []
-            st.warning(f"Não foi possível ler a aba DINAMICA: {exc}")
-    else:
-        detected = []
-    mode = st.selectbox(
-        "Modo de importação",
-        ["Complementar base atual", "Substituir toda a base"],
-        key="dinamica_import_mode",
-        help="Use complementar para acrescentar/atualizar colunas de outro mês sem apagar as demais colunas já importadas.",
-    )
-    selected_columns = st.multiselect(
-        "Colunas a carregar",
-        options=list(DINAMICA_IMPORT_LABELS.keys()),
-        default=detected,
-        format_func=lambda col: DINAMICA_IMPORT_LABELS[col],
-        key="dinamica_import_columns",
-    )
-    if st.button("Importar colunas selecionadas", type="primary", key="dinamica_upload_process", disabled=uploaded is None or not selected_columns):
-        ok, message = process_dinamica_upload(uploaded, year, mode, selected_columns)
-        if ok:
-            st.success(message)
-            st.rerun()
-        else:
-            st.warning(message)
-
-def render_import_panel(
-    title: str,
-    subtitle: str,
-    fields: list[str],
-    uploader_label: str,
-    uploader_key: str,
-    button_label: str,
-    tipo: str,
-    year: int,
-    depara: pd.DataFrame,
-    depara_operadoras: pd.DataFrame,
-):
-    st.markdown(
-        f"""
-        <div class="upload-panel">
-            <h4>{title}</h4>
-            <div class="small-muted">{subtitle}</div>
-            <div style="height: 10px"></div>
-            <div class="small-muted"><strong>Campos esperados</strong></div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    render_field_chips(fields)
-    uploaded = st.file_uploader(uploader_label, type=["xlsx", "csv"], key=uploader_key, label_visibility="collapsed")
-    if uploaded:
-        st.caption(f"Arquivo selecionado: `{uploaded.name}`")
-    if st.button(button_label, type="primary", key=f"{uploader_key}_process", disabled=uploaded is None):
-        ok, message = process_import_file(tipo, uploaded, year, depara, depara_operadoras)
-        if ok:
-            st.success(message)
-        else:
-            st.warning(message)
-
-def render_import_history():
-    ensure_importacoes_table()
-    history = read_table("importacoes")
-    st.subheader("Histórico de importações")
-    if history.empty:
-        st.info("Nenhuma importação registrada ainda.")
-        return
-
-    query = st.text_input("Buscar histórico", placeholder="Buscar por arquivo, tipo, período, status ou usuário...")
-    filtered = history.copy()
-    if query:
-        needle = norm_text(query)
-        mask = pd.Series(False, index=filtered.index)
-        for col in ["tipo_arquivo", "nome_arquivo", "mes_ano_identificado", "status", "usuario", "detalhes"]:
-            if col in filtered:
-                mask = mask | filtered[col].fillna("").astype(str).apply(norm_text).str.contains(needle, regex=False)
-        filtered = filtered[mask]
-
-    if not filtered.empty:
-        filtered = filtered.iloc[::-1].reset_index(drop=True)
-
-    render_native_table(
-        filtered,
-        [
-            "data_hora",
-            "tipo_arquivo",
-            "nome_arquivo",
-            "mes_ano_identificado",
-            "qtd_linhas",
-            "status",
-            "usuario",
-            "detalhes",
-        ],
-        labels={
-            "data_hora": "Data/hora",
-            "tipo_arquivo": "Tipo de arquivo",
-            "nome_arquivo": "Nome do arquivo",
-            "mes_ano_identificado": "Mês/ano",
-            "qtd_linhas": "Qtd. linhas",
-            "status": "Status",
-            "usuario": "Usuário",
-            "detalhes": "Detalhes",
-        },
-        status_cols={"status"},
-        strong_cols={"nome_arquivo"},
-        max_rows=20,
-    )
-    st.caption(f"Mostrando {len(filtered)} de {len(history)} registros.")
-
-def dashboard_status(row: pd.Series) -> str:
-    faturado = float(row.get("faturado", 0) or 0)
-    recebido = float(row.get("total_recebido_bruto", 0) or 0)
-    perc = float(row.get("perc_recebido_total", 0) or 0)
-    if faturado <= 0 and recebido > 0:
-        return "Recebido sem faturamento"
-    if faturado <= 0:
-        return "Sem faturamento"
-    if perc >= 1.05:
-        return "Acima do faturado"
-    if perc >= 0.95:
-        return "Recebido"
-    if recebido > 0:
-        return "Parcial"
-    return "Pendente"
-
-def prepare_dashboard_consolidado(consolidado: pd.DataFrame) -> pd.DataFrame:
-    if consolidado.empty:
-        return consolidado
-    out = consolidado.copy()
-    if "alerta_diretoria" not in out:
-        out["alerta_diretoria"] = 0
-    if "sinal_diretoria" not in out:
-        out["sinal_diretoria"] = ""
-    out["sinal_diretoria"] = out["sinal_diretoria"].apply(normalize_director_signal)
-    legacy_red = out["alerta_diretoria"].apply(as_bool_flag) & (out["sinal_diretoria"] == "")
-    out.loc[legacy_red, "sinal_diretoria"] = "vermelho"
-    out["alerta_diretoria"] = (out["sinal_diretoria"] == "vermelho").astype(int)
-    out["status"] = out.apply(dashboard_status, axis=1)
-    out["chave_executiva"] = out["unidade_padrao"].astype(str) + " | " + out["operadora_padrao"].astype(str)
-    return out
-
-def render_kpi_card(label: str, value: str, note: str = "", alert: bool = False):
-    css_class = "kpi-card kpi-alert" if alert else "kpi-card"
-    safe_label = html_text(label)
-    safe_value = html_text(value)
-    safe_note = html_text(note)
-    st.markdown(
-        f"""
-        <div class="{css_class}">
-            <div class="kpi-label">{safe_label}</div>
-            <div class="kpi-value">{safe_value}</div>
-            <div class="kpi-note">{safe_note}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-def render_issue_card(label: str, value: int, severity: str, css_class: str):
-    st.markdown(
-        f"""
-        <div class="issue-card {css_class}">
-            <span class="issue-severity">{severity}</span>
-            <div class="issue-value">{value}</div>
-            <div class="issue-label">{label}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-def pending_list_html(pending: pd.DataFrame) -> str:
-    if pending.empty:
-        return '<div class="small-muted">Não há pendências positivas no recorte selecionado.</div>'
-    max_value = float(pending["diferenca_pendente"].max() or 1)
-    rows = []
-    for _, row in pending.head(5).iterrows():
-        label = html_text(short_label(row.get("unidade_padrao", ""), 30))
-        value = float(row.get("diferenca_pendente", 0) or 0)
-        width = max(6, min(100, int((value / max_value) * 100)))
-        rows.append(
-            f"""
-            <div class="pending-row">
-                <div class="pending-row-top">
-                    <span>{label}</span>
-                    <span class="pending-row-value">{fmt_money_html(value)}</span>
-                </div>
-                <div class="bar-track"><div class="bar-fill" style="width:{width}%"></div></div>
-            </div>
-            """
-        )
-    return "".join(rows)
-
-def dashboard_detail_column_spec(df: pd.DataFrame) -> tuple[list[str], dict[str, str], set[str]]:
-    fat_detail_cols = sorted(
-        [col for col in df.columns if col.startswith("fat_")],
-        key=lambda col: int(col.split("_", 1)[1]) if col.split("_", 1)[1].isdigit() else 99,
-    )
-    table_cols = [
-        "unidade_padrao",
-        "operadora_padrao",
-        *fat_detail_cols,
-        "faturado",
-        "total_recebido_bruto",
-        "total_recebido_liquido",
-        "diferenca_pendente",
-        "perc_recebido_total",
-        "status",
-        "alerta_diretoria",
-        "observacoes_consolidadas",
-    ]
-    table_cols = [col for col in table_cols if col in df.columns]
-    labels = {
-        "unidade_padrao": "Unidade",
-        "operadora_padrao": "Operadora",
-        "faturado": "Faturamento Total",
-        "total_recebido_bruto": "Rec. bruto",
-        "total_recebido_liquido": "Rec. líquido",
-        "diferenca_pendente": "Dif. pendente",
-        "perc_recebido_total": "% recebido",
-        "status": "Status",
-        "alerta_diretoria": "Alerta",
-        "observacoes_consolidadas": "Observações",
-    }
-    for col in fat_detail_cols:
-        month = int(col.split("_", 1)[1])
-        labels[col] = f"Fat. {MONTHS.get(month, month)}"
-    return table_cols, labels, set(fat_detail_cols)
-
-def render_dashboard_executivo(consolidado: pd.DataFrame, rec_months: list[int], fat: pd.DataFrame, cont: pd.DataFrame, depara: pd.DataFrame, depara_operadoras: pd.DataFrame):
-    dash = prepare_dashboard_consolidado(consolidado)
-    if dash.empty:
-        st.warning("Ainda não há dados suficientes para consolidar com os parâmetros escolhidos.")
-        return
-
-    f1, f2, f3 = st.columns([1, 1, 1])
-    unidade_opts = sorted(dash["unidade_padrao"].dropna().astype(str).unique().tolist())
-    operadora_opts = sorted(dash["operadora_padrao"].dropna().astype(str).unique().tolist())
-    status_opts = sorted(dash["status"].dropna().astype(str).unique().tolist())
-    with f1:
-        selected_unit = st.selectbox("Unidade/filial", ["Todas"] + unidade_opts)
-    with f2:
-        selected_op = st.selectbox("Operadora", ["Todas"] + operadora_opts)
-    with f3:
-        selected_status = st.selectbox("Status", ["Todos"] + status_opts)
-
-    filtered = dash.copy()
-    if selected_unit != "Todas":
-        filtered = filtered[filtered["unidade_padrao"] == selected_unit]
-    if selected_op != "Todas":
-        filtered = filtered[filtered["operadora_padrao"] == selected_op]
-    if selected_status != "Todos":
-        filtered = filtered[filtered["status"] == selected_status]
-
-    if filtered.empty:
-        st.info("Nenhuma linha encontrada para os filtros selecionados.")
-        return
-
-    total_fat = filtered["faturado"].sum()
-    total_bruto = filtered["total_recebido_bruto"].sum()
-    total_liq = filtered["total_recebido_liquido"].sum()
-    pendente = filtered["diferenca_pendente"].sum()
-    perc = total_bruto / total_fat if total_fat else 0
-    unidades = filtered["unidade_padrao"].nunique()
-    operadoras = filtered["operadora_padrao"].nunique()
-    alertas_diretoria = int(filtered["alerta_diretoria"].apply(as_bool_flag).sum()) if "alerta_diretoria" in filtered else 0
-
-    render_kpi_row("dashboard", [
-        {"key": "total_faturado", "label": "Total Faturado", "value": fmt_money(total_fat), "note": "Competência selecionada"},
-        {"key": "recebido_bruto", "label": "Recebido Bruto", "value": fmt_money(total_bruto), "note": "Recebimentos selecionados"},
-        {"key": "recebido_liquido", "label": "Recebido Líquido", "value": fmt_money(total_liq), "note": "Após retenções"},
-        {"key": "diferenca_pendente", "label": "Diferença Pendente", "value": fmt_money(pendente), "note": "Faturado - recebido bruto", "alert": pendente > 0},
-        {"key": "alertas_diretoria", "label": "Alertas Vermelhos", "value": str(alertas_diretoria), "note": "Marcados para diretoria", "alert": alertas_diretoria > 0},
-        {"key": "perc_recebido", "label": "% Recebido", "value": fmt_pct(perc), "note": "Bruto sobre faturado"},
-    ])
-
-    st.caption(f"{unidades} unidades e {operadoras} operadoras com movimento no recorte selecionado.")
-
-    chart_col, side_col = st.columns([2, 1])
-    with chart_col:
-        rec_data = []
-        for m in rec_months:
-            col = f"rec_bruto_{m}"
-            if col in filtered:
-                rec_data.append({"Mês": MONTHS[m], "Recebido Bruto": filtered[col].sum()})
-        rec_df = pd.DataFrame(rec_data)
-        st.markdown(
-            f"""
-            <div class="panel">
-                <div class="section-title">Recebido Bruto por Mês</div>
-                {dashboard_bar_chart_html(rec_df)}
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with side_col:
-        pending = (
-            filtered[filtered["diferenca_pendente"] > 0]
-            .sort_values("diferenca_pendente", ascending=False)
-            .head(5)
-            .copy()
-        )
-        st.markdown(
-            f"""
-            <div class="panel">
-                <div class="section-title">Top Pendências por Unidade</div>
-                {pending_list_html(pending)}
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    t1, t2 = st.columns([4, 1])
-    with t1:
-        st.markdown('<div class="section-title">Top Pendências Detalhadas</div>', unsafe_allow_html=True)
-    with t2:
-        st.caption("Ver todas")
-    table_cols, labels, fat_detail_cols = dashboard_detail_column_spec(filtered)
-    top = filtered.sort_values("diferenca_pendente", ascending=False)[table_cols].head(20).copy()
-    if "perc_recebido_total" in top:
-        top["perc_recebido_total"] = top["perc_recebido_total"] * 100
-    table_cols = configure_columns(
-        "dashboard_detalhado",
-        table_cols,
-        labels,
-        locked={"unidade_padrao", "operadora_padrao"},
-    )
-    render_native_table(
-        top,
-        table_cols,
-        labels=labels,
-        money_cols={"faturado", *fat_detail_cols, "total_recebido_bruto", "total_recebido_liquido", "diferenca_pendente"},
-        pct_cols={"perc_recebido_total"},
-        status_cols={"status"},
-        strong_cols={"unidade_padrao"},
-        highlight_cols={"faturado", *fat_detail_cols},
-        max_rows=20,
-    )
-
-    with st.expander("Alertas executivos"):
-        table_cols = [
-            "Indicador",
-            "Qtd.",
-        ]
-        inconsistencias = build_inconsistencias(fat, cont, depara, depara_operadoras)
-        op_sem_depara = count_inconsistencias(inconsistencias, "DE/PARA Operadora")
-        un_sem_depara = count_inconsistencias(inconsistencias, "DE/PARA Unidade")
-        linhas_zeradas = count_inconsistencias(inconsistencias, "Linha Zerada")
-        acima = int((filtered["status"] == "Acima do faturado").sum())
-        parcial = int((filtered["status"] == "Parcial").sum())
-        pendentes = int((filtered["status"] == "Pendente").sum())
-        alerts = pd.DataFrame([
-            {"Indicador": "Operadoras sem DE/PARA", "Qtd.": op_sem_depara},
-            {"Indicador": "Unidades sem DE/PARA", "Qtd.": un_sem_depara},
-            {"Indicador": "Linhas zeradas", "Qtd.": linhas_zeradas},
-            {"Indicador": "Recebido acima do faturado", "Qtd.": acima},
-            {"Indicador": "Recebimento parcial", "Qtd.": parcial},
-            {"Indicador": "Sem recebimento", "Qtd.": pendentes},
-        ])
-        render_native_table(
-            alerts,
-            table_cols,
-            labels={"Indicador": "Indicador", "Qtd.": "Qtd."},
-            strong_cols={"Indicador"},
-            max_rows=10,
-        )
-
-def ensure_comentarios_table():
-    _db_ensure_table(
-        """
-        CREATE TABLE IF NOT EXISTS comentarios_manuais (
-            unidade_padrao TEXT,
-            operadora_padrao TEXT,
-            mes_referencia INTEGER,
-            ano_referencia INTEGER,
-            comentario_manual TEXT,
-            atualizado_por TEXT,
-            atualizado_em TEXT
-        )
-        """
-    )
-
-def ensure_lancamentos_manuais_table():
-    _db_ensure_table(
-        """
-        CREATE TABLE IF NOT EXISTS lancamentos_manuais (
-            id TEXT PRIMARY KEY,
-            unidade_padrao TEXT,
-            operadora_padrao TEXT,
-            mes_referencia INTEGER,
-            ano_referencia INTEGER,
-            tipo_lancamento TEXT,
-            valor REAL,
-            motivo TEXT,
-            atualizado_por TEXT,
-            atualizado_em TEXT
-        )
-        """
-    )
-
-def build_diferenca_unidade_summary(filtered: pd.DataFrame) -> pd.DataFrame:
-    if filtered.empty:
-        return pd.DataFrame()
-    work = filtered.copy()
-    if "alerta_diretoria" not in work:
-        work["alerta_diretoria"] = 0
-    work["alerta_diretoria"] = work["alerta_diretoria"].apply(lambda value: int(as_bool_flag(value)))
-    summary = (
-        work.groupby("unidade_padrao", dropna=False)
-        .agg(
-            qtd_operadoras=("operadora_padrao", "nunique"),
-            faturado=("faturado", "sum"),
-            total_recebido_bruto=("total_recebido_bruto", "sum"),
-            total_recebido_liquido=("total_recebido_liquido", "sum"),
-            diferenca_pendente=("diferenca_pendente", "sum"),
-            alertas_vermelhos=("alerta_diretoria", "sum"),
-            observacoes=("observacoes_consolidadas", lambda values: int(sum(1 for value in values if str(value or "").strip()))),
-        )
-        .reset_index()
-    )
-    summary["perc_recebido_total"] = summary.apply(
-        lambda row: (float(row["total_recebido_bruto"]) / float(row["faturado"])) if float(row["faturado"] or 0) else 0,
-        axis=1,
-    )
-    summary["status"] = summary.apply(dashboard_status, axis=1)
-    summary["alerta_diretoria"] = (summary["alertas_vermelhos"] > 0).astype(int)
-    return summary.sort_values(["alerta_diretoria", "diferenca_pendente"], ascending=[False, False]).reset_index(drop=True)
-
-def render_diferenca_unidade_tab(filtered: pd.DataFrame):
-    summary = build_diferenca_unidade_summary(filtered)
-    if summary.empty:
-        st.info("Nenhum resumo por unidade encontrado para os filtros selecionados.")
-        return
-
-    total_dif = summary["diferenca_pendente"].sum()
-    unidades_alerta = int((summary["alerta_diretoria"] > 0).sum())
-    unidades_criticas = int((summary["perc_recebido_total"] < 0.8).sum())
-    pior_unidade = str(summary.sort_values("diferenca_pendente", ascending=False)["unidade_padrao"].iloc[0])
-
-    render_kpi_row("diferenca_unidade", [
-        {"key": "dif_total", "label": "Diferenca Total", "value": fmt_money(total_dif), "note": "Faturado - recebido bruto", "alert": total_dif > 0},
-        {"key": "unidades_alerta", "label": "Unidades em Vermelho", "value": str(unidades_alerta), "note": "Com alerta da diretoria", "alert": unidades_alerta > 0},
-        {"key": "unidades_criticas", "label": "Unidades Criticas", "value": str(unidades_criticas), "note": "Recebimento bruto abaixo de 80%", "alert": unidades_criticas > 0},
-        {"key": "maior_dif", "label": "Maior Diferenca", "value": short_label(pior_unidade, 24), "note": fmt_money(summary["diferenca_pendente"].max()), "alert": summary["diferenca_pendente"].max() > 0},
-    ])
-
-    table = summary.copy()
-    table["perc_recebido_total"] = table["perc_recebido_total"] * 100
-    columns = [
-        "alerta_diretoria",
-        "unidade_padrao",
-        "qtd_operadoras",
-        "faturado",
-        "total_recebido_bruto",
-        "total_recebido_liquido",
-        "diferenca_pendente",
-        "perc_recebido_total",
-        "status",
-        "alertas_vermelhos",
-        "observacoes",
-    ]
-    labels = {
-        "alerta_diretoria": "Alerta",
-        "unidade_padrao": "Unidade",
-        "qtd_operadoras": "Operadoras",
-        "faturado": "Faturamento",
-        "total_recebido_bruto": "Rec. bruto",
-        "total_recebido_liquido": "Rec. liquido",
-        "diferenca_pendente": "Dif. pendente",
-        "perc_recebido_total": "% recebido",
-        "status": "Status",
-        "alertas_vermelhos": "Alertas",
-        "observacoes": "Obs.",
-    }
-    st.markdown('<div class="section-title">Consolidado da diferenca por unidade</div>', unsafe_allow_html=True)
-    render_native_table(
-        table,
-        columns,
-        labels=labels,
-        money_cols={"faturado", "total_recebido_bruto", "total_recebido_liquido", "diferenca_pendente"},
-        pct_cols={"perc_recebido_total"},
-        status_cols={"status"},
-        strong_cols={"unidade_padrao"},
-        max_rows=60,
-    )
-    st.caption(f"{len(summary)} unidades no recorte selecionado.")
-
-def render_acerto_contas_executive_view(filtered: pd.DataFrame):
-    if filtered is None or filtered.empty:
-        return
-
-    st.markdown('<div class="section-title">Visao executiva dos acertos</div>', unsafe_allow_html=True)
-    st.caption(
-        "Valores do recorte filtrado. Saldo positivo indica valor a receber; "
-        "saldo negativo indica valor a repassar."
-    )
-
-    branch_summary = build_branch_net_summary(filtered)
-    operator_summary = (
-        filtered.groupby("operadora", as_index=False)
-        .agg(
-            valor_acerto=("valor_acerto", "sum"),
-            filiais_fiscais=("filial_fiscal_pagadora", "nunique"),
-            filiais_recebedoras=("filial_faturadora_recebedora", "nunique"),
-        )
-        .sort_values("valor_acerto", ascending=False)
-        .reset_index(drop=True)
-    )
-    total_filtered = float(operator_summary["valor_acerto"].sum())
-    operator_summary["participacao"] = operator_summary["valor_acerto"].apply(
-        lambda value: float(value) / total_filtered if total_filtered else 0.0
-    )
-    operator_summary["valor_formatado"] = operator_summary["valor_acerto"].apply(fmt_money)
-    operator_summary["participacao_formatada"] = operator_summary["participacao"].apply(
-        lambda value: f"{float(value) * 100:.1f}%".replace(".", ",")
-    )
-
-    chart_left, chart_right = st.columns([1.08, 0.92], gap="large")
-    with chart_left:
-        st.markdown("##### Posicao liquida por filial")
-        if branch_summary.empty:
-            st.info("Sem saldo por filial para o recorte selecionado.")
-        else:
-            branch_chart_data = branch_summary.copy()
-            branch_chart_data["posicao"] = branch_chart_data["saldo_liquido"].apply(
-                lambda value: "A receber" if float(value) > 0 else (
-                    "A repassar" if float(value) < 0 else "Zerado"
-                )
-            )
-            branch_chart_data["valor_liquido"] = branch_chart_data["saldo_liquido"].abs()
-            branch_chart_data["saldo_formatado"] = branch_chart_data["saldo_liquido"].apply(fmt_money)
-            branch_chart_data["valor_liquido_formatado"] = branch_chart_data["valor_liquido"].apply(fmt_money)
-            branch_chart_data["repassar_formatado"] = branch_chart_data["total_a_pagar"].apply(fmt_money)
-            branch_chart_data["receber_formatado"] = branch_chart_data["total_a_receber"].apply(fmt_money)
-
-            max_net_value = max(float(branch_chart_data["valor_liquido"].max()), 1.0)
-            net_domain = [0, max_net_value * 1.28]
-            y_branch = alt.Y(
-                "filial:N",
-                title=None,
-                sort=alt.SortField("valor_liquido", order="descending"),
-                axis=alt.Axis(labelLimit=190),
-            )
-            x_net_value = alt.X(
-                "valor_liquido:Q",
-                title="Valor liquido (R$)",
-                scale=alt.Scale(domain=net_domain),
-                axis=alt.Axis(format="~s"),
-            )
-            branch_tooltip = [
-                alt.Tooltip("filial:N", title="Filial"),
-                alt.Tooltip("posicao:N", title="Posicao"),
-                alt.Tooltip("saldo_formatado:N", title="Saldo liquido"),
-                alt.Tooltip("repassar_formatado:N", title="Total a repassar"),
-                alt.Tooltip("receber_formatado:N", title="Total a receber"),
-            ]
-            branch_base = alt.Chart(branch_chart_data).encode(y=y_branch)
-            branch_bars = branch_base.mark_bar(size=18, cornerRadiusEnd=3).encode(
-                x=x_net_value,
-                color=alt.Color(
-                    "posicao:N",
-                    title=None,
-                    scale=alt.Scale(
-                        domain=["A receber", "A repassar", "Zerado"],
-                        range=["#0B3473", "#D89B00", "#8A9099"],
-                    ),
-                    legend=alt.Legend(orient="top"),
-                ),
-                tooltip=branch_tooltip,
-            )
-            branch_labels = (
-                alt.Chart(branch_chart_data)
-                .mark_text(align="left", baseline="middle", dx=5, color="#22252A", fontSize=11)
-                .encode(
-                    x=alt.X("valor_liquido:Q", scale=alt.Scale(domain=net_domain)),
-                    y=y_branch,
-                    text="valor_liquido_formatado:N",
-                )
-            )
-            branch_chart = (
-                (branch_bars + branch_labels)
-                .properties(height=max(290, len(branch_chart_data) * 30))
-                .configure_view(stroke=None)
-                .configure_axis(
-                    labelColor="#30343B",
-                    titleColor="#30343B",
-                    gridColor="#E2E5EA",
-                    domainColor="#C6CBD2",
-                )
-                .configure_legend(labelColor="#30343B")
-            )
-            st.altair_chart(branch_chart, width="stretch")
-
-    with chart_right:
-        st.markdown("##### Acertos por operadora")
-        operator_chart_data = operator_summary.head(12).copy()
-        max_operator = max(float(operator_chart_data["valor_acerto"].max()), 1.0)
-        y_operator = alt.Y(
-            "operadora:N",
-            title=None,
-            sort=alt.SortField("valor_acerto", order="descending"),
-            axis=alt.Axis(labelLimit=180),
-        )
-        operator_bars = (
-            alt.Chart(operator_chart_data)
-            .mark_bar(size=18, color="#244F94", cornerRadiusEnd=3)
-            .encode(
-                x=alt.X(
-                    "valor_acerto:Q",
-                    title="Valor dos acertos (R$)",
-                    scale=alt.Scale(domain=[0, max_operator * 1.28]),
-                    axis=alt.Axis(format="~s"),
-                ),
-                y=y_operator,
-                tooltip=[
-                    alt.Tooltip("operadora:N", title="Operadora"),
-                    alt.Tooltip("valor_formatado:N", title="Valor dos acertos"),
-                    alt.Tooltip("participacao_formatada:N", title="Participacao"),
-                    alt.Tooltip("filiais_fiscais:Q", title="Filiais que repassam"),
-                    alt.Tooltip("filiais_recebedoras:Q", title="Filiais que recebem"),
-                ],
-            )
-        )
-        operator_labels = (
-            alt.Chart(operator_chart_data)
-            .mark_text(align="left", baseline="middle", dx=5, color="#22252A", fontSize=11)
-            .encode(
-                x=alt.X("valor_acerto:Q", scale=alt.Scale(domain=[0, max_operator * 1.28])),
-                y=y_operator,
-                text="valor_formatado:N",
-            )
-        )
-        operator_chart = (
-            (operator_bars + operator_labels)
-            .properties(height=max(290, len(operator_chart_data) * 30))
-            .configure_view(stroke=None)
-            .configure_axis(
-                labelColor="#30343B",
-                titleColor="#30343B",
-                gridColor="#E2E5EA",
-                domainColor="#C6CBD2",
-            )
-        )
-        st.altair_chart(operator_chart, width="stretch")
-        if len(operator_summary) > 12:
-            st.caption(f"Exibindo as 12 maiores de {len(operator_summary)} operadoras no recorte.")
-
-    flow_summary = (
-        filtered.groupby(
-            ["filial_fiscal_pagadora", "filial_faturadora_recebedora"],
-            as_index=False,
-        )
-        .agg(
-            valor_acerto=("valor_acerto", "sum"),
-            qtd_operadoras=("operadora", "nunique"),
-        )
-    )
-    flow_summary["valor_formatado"] = flow_summary["valor_acerto"].apply(fmt_money)
-    st.markdown("##### Mapa de repasses entre filiais")
-    st.caption(
-        "Nas linhas, a filial fiscal que recebeu o recurso e deve repassar. "
-        "Nas colunas, a filial de atendimento/faturamento que deve receber."
-    )
-    flow_chart = (
-        alt.Chart(flow_summary)
-        .mark_rect(cornerRadius=2)
-        .encode(
-            x=alt.X(
-                "filial_faturadora_recebedora:N",
-                title="Atendimento/faturamento que recebe",
-                sort=sorted(flow_summary["filial_faturadora_recebedora"].unique().tolist()),
-                axis=alt.Axis(labelAngle=-32, labelLimit=150),
-            ),
-            y=alt.Y(
-                "filial_fiscal_pagadora:N",
-                title="Fiscal que repassa",
-                sort=sorted(flow_summary["filial_fiscal_pagadora"].unique().tolist()),
-                axis=alt.Axis(labelLimit=190),
-            ),
-            color=alt.Color(
-                "valor_acerto:Q",
-                title="Valor do acerto",
-                scale=alt.Scale(range=["#EEF3FB", "#0B3473"]),
-                legend=alt.Legend(format="~s"),
-            ),
-            tooltip=[
-                alt.Tooltip("filial_fiscal_pagadora:N", title="Fiscal que repassa"),
-                alt.Tooltip(
-                    "filial_faturadora_recebedora:N",
-                    title="Atendimento/faturamento que recebe",
-                ),
-                alt.Tooltip("valor_formatado:N", title="Valor do acerto"),
-                alt.Tooltip("qtd_operadoras:Q", title="Operadoras"),
-            ],
-        )
-        .properties(height=max(300, flow_summary["filial_fiscal_pagadora"].nunique() * 38))
-        .configure_view(stroke="#D5DAE1")
-        .configure_axis(
-            labelColor="#30343B",
-            titleColor="#30343B",
-            domainColor="#C6CBD2",
-        )
-        .configure_legend(labelColor="#30343B", titleColor="#30343B")
-    )
-    st.altair_chart(flow_chart, width="stretch")
-
-
-def render_acerto_contas_tab(
-    consolidado: pd.DataFrame,
-    fat_months: list[int],
-    year: int,
-):
-    source = consolidado.copy()
-    fresh_base = normalize_base_dinamica(read_table("base_dinamica"))
-    if not fresh_base.empty:
-        fresh_observations = (
-            fresh_base.groupby(["unidade_padrao", "operadora_padrao"], dropna=False)["observacao"]
-            .apply(lambda values: " | ".join(
-                dict.fromkeys(str(value).strip() for value in values if str(value).strip())
-            ))
-            .reset_index()
-            .rename(columns={"observacao": "observacao_fiscal_atual"})
-        )
-        source = source.merge(
-            fresh_observations,
-            on=["unidade_padrao", "operadora_padrao"],
-            how="left",
-        )
-        if "observacao_fiscal" not in source:
-            source["observacao_fiscal"] = ""
-        source["observacao_fiscal"] = source["observacao_fiscal_atual"].where(
-            source["observacao_fiscal_atual"].notna(),
-            source["observacao_fiscal"],
-        )
-        source = source.drop(columns=["observacao_fiscal_atual"], errors="ignore")
-
-    settlements = build_automatic_settlements(
-        source,
-        fat_months,
-        int(year),
-        read_table("de_para_unidades"),
-    )
-    if settlements.empty:
-        st.info("Nenhum acerto de contas foi identificado automaticamente.")
-        return
-
-    ready = settlements[settlements["status"] == "Pronto"].copy()
-    pending = settlements[settlements["status"] != "Pronto"].copy()
-    total_value = float(ready["valor_acerto"].sum()) if not ready.empty else 0.0
-    transfer_pairs = (
-        ready[["filial_fiscal_pagadora", "filial_faturadora_recebedora"]]
-        .drop_duplicates()
-        .shape[0]
-        if not ready.empty
-        else 0
-    )
-    repasser_count = ready["filial_fiscal_pagadora"].nunique() if not ready.empty else 0
-
-    render_kpi_row("acerto_contas", [
-        {
-            "key": "valor_acerto",
-            "label": "Valor dos Acertos",
-            "value": fmt_money(total_value),
-            "note": "Repasses automaticos prontos",
-        },
-        {
-            "key": "transferencias",
-            "label": "Relacoes entre Filiais",
-            "value": str(transfer_pairs),
-            "note": "Fiscal que repassa para faturadora",
-        },
-        {
-            "key": "repassadoras",
-            "label": "Filiais com Repasse",
-            "value": str(repasser_count),
-            "note": "Receberam recurso e devem repassar",
-        },
-        {
-            "key": "pendencias",
-            "label": "Pendencias",
-            "value": str(len(pending)),
-            "note": "Fora do total automatico",
-            "alert": len(pending) > 0,
-        },
-    ])
-
-    filter_1, filter_2, filter_3, filter_4 = st.columns([0.8, 1.2, 1.2, 1.2])
-    with filter_1:
-        selected_competence = st.selectbox(
-            "Competencia do acerto",
-            ["Todas"] + ready["competencia"].drop_duplicates().tolist(),
-            key="acerto_competencia",
-        )
-    with filter_2:
-        selected_payer = st.selectbox(
-            "Fiscal que recebeu e deve repassar",
-            ["Todas"] + sorted(ready["filial_fiscal_pagadora"].dropna().unique().tolist()),
-            key="acerto_pagadora",
-        )
-    with filter_3:
-        selected_receiver = st.selectbox(
-            "Atendimento/faturamento que deve receber",
-            ["Todas"] + sorted(ready["filial_faturadora_recebedora"].dropna().unique().tolist()),
-            key="acerto_recebedora",
-        )
-    with filter_4:
-        selected_operator = st.selectbox(
-            "Operadora do acerto",
-            ["Todas"] + sorted(ready["operadora"].dropna().unique().tolist()),
-            key="acerto_operadora",
-        )
-
-    filtered = ready.copy()
-    if selected_competence != "Todas":
-        filtered = filtered[filtered["competencia"] == selected_competence]
-    if selected_payer != "Todas":
-        filtered = filtered[filtered["filial_fiscal_pagadora"] == selected_payer]
-    if selected_receiver != "Todas":
-        filtered = filtered[filtered["filial_faturadora_recebedora"] == selected_receiver]
-    if selected_operator != "Todas":
-        filtered = filtered[filtered["operadora"] == selected_operator]
-
-    if filtered.empty:
-        st.info("Nenhuma transferencia encontrada para os filtros selecionados.")
-    else:
-        render_acerto_contas_executive_view(filtered)
-
-        st.markdown('<div class="section-title">Transferencias sugeridas</div>', unsafe_allow_html=True)
-        display = filtered[[
-            "competencia",
-            "filial_fiscal_pagadora",
-            "filial_faturadora_recebedora",
-            "operadora",
-            "valor_acerto",
-        ]].copy()
-        display["valor_acerto"] = display["valor_acerto"].apply(fmt_money)
-        display = display.rename(columns={
-            "competencia": "Competencia",
-            "filial_fiscal_pagadora": "Fiscal que recebeu e deve repassar",
-            "filial_faturadora_recebedora": "Atendimento/faturamento que deve receber",
-            "operadora": "Operadora",
-            "valor_acerto": "Valor do acerto",
-        })
-        st.dataframe(display, hide_index=True, width="stretch", height=min(640, 38 + len(display) * 35))
-
-        st.markdown('<div class="section-title">Texto para acerto de contas</div>', unsafe_allow_html=True)
-        st.code(format_settlements_for_copy(filtered), language=None, wrap_lines=True)
-
-        summary = build_branch_net_summary(filtered)
-        if not summary.empty:
-            summary["posicao"] = summary["saldo_liquido"].apply(
-                lambda value: "Receber" if float(value) > 0 else (
-                    "Repassar" if float(value) < 0 else "Zerado"
-                )
-            )
-            summary["valor_liquido"] = summary["saldo_liquido"].abs()
-            summary_display = summary[[
-                "filial",
-                "total_a_pagar",
-                "total_a_receber",
-                "posicao",
-                "valor_liquido",
-            ]].copy()
-            for col in ["total_a_pagar", "total_a_receber", "valor_liquido"]:
-                summary_display[col] = summary_display[col].apply(fmt_money)
-            summary_display = summary_display.rename(columns={
-                "filial": "Filial",
-                "total_a_pagar": "Total a repassar",
-                "total_a_receber": "Total a receber",
-                "posicao": "Posicao liquida",
-                "valor_liquido": "Valor liquido",
-            })
-            st.markdown('<div class="section-title">Resumo liquido por filial</div>', unsafe_allow_html=True)
-            st.dataframe(summary_display, hide_index=True, width="stretch")
-
-    if not pending.empty:
-        with st.expander(f"Pendencias para revisao ({len(pending)})", expanded=False):
-            pending_display = pending[[
-                "competencia",
-                "filial_fiscal_pagadora",
-                "filial_faturadora_recebedora",
-                "operadora",
-                "valor_acerto",
-                "status",
-                "observacao_origem",
-            ]].copy()
-            pending_display["valor_acerto"] = pending_display["valor_acerto"].apply(fmt_money)
-            pending_display = pending_display.rename(columns={
-                "competencia": "Competencia",
-                "filial_fiscal_pagadora": "Fiscal que recebeu e deve repassar",
-                "filial_faturadora_recebedora": "Atendimento/faturamento que deve receber",
-                "operadora": "Operadora",
-                "valor_acerto": "Valor identificado",
-                "status": "Pendencia",
-                "observacao_origem": "Observacao de origem",
-            })
-            st.dataframe(pending_display, hide_index=True, width="stretch")
-
-def save_director_alerts(edited: pd.DataFrame, base: pd.DataFrame, year: int) -> int:
-    base = normalize_base_dinamica(base)
-    if base.empty:
-        return 0
-    edited = edited.copy()
-    for col in ["unidade_padrao", "operadora_padrao", "alerta_diretoria"]:
-        if col not in edited:
-            edited[col] = ""
-    base["_key"] = base["unidade_padrao"].apply(norm_text) + "||" + base["operadora_padrao"].apply(norm_text)
-    edited["_key"] = edited["unidade_padrao"].apply(norm_text) + "||" + edited["operadora_padrao"].apply(norm_text)
-    changed = 0
-    for _, row in edited.iterrows():
-        key = row["_key"]
-        if not key.strip("|"):
-            continue
-        new_value = int(as_bool_flag(row.get("alerta_diretoria", 0)))
-        mask = base["_key"] == key
-        if not mask.any():
-            continue
-        old_values = pd.to_numeric(base.loc[mask, "alerta_diretoria"], errors="coerce").fillna(0).astype(int)
-        if not old_values.eq(new_value).all():
-            changed += 1
-        base.loc[mask, "alerta_diretoria"] = new_value
-    replace_base_dinamica(base.drop(columns="_key", errors="ignore"), "Marcacao portal alerta diretoria", year=int(year))
-    return changed
-
-def render_director_alert_editor(scoped: pd.DataFrame, base: pd.DataFrame, year: int):
-    if scoped.empty:
-        st.info("Nenhuma linha disponivel para marcacao com os filtros atuais.")
-        return
-    if base is None or base.empty:
-        st.warning("A marcacao vermelha depende da base dinamica importada. Importe a base consolidada antes de editar alertas.")
-        return
-
-    st.markdown(
-        """
-        <div class="director-alert-panel">
-            <strong>Marcacao vermelha da diretoria</strong><br>
-            Use o checkbox para sinalizar linhas que precisam ficar gritantes no consolidado. Ao salvar, a linha passa a abrir em vermelho no portal.
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    grid = scoped[[
-        "alerta_diretoria",
-        "unidade_padrao",
-        "operadora_padrao",
-        "diferenca_pendente",
-        "perc_recebido_total",
-        "status",
-        "observacoes_consolidadas",
-    ]].copy()
-    grid["alerta_diretoria"] = grid["alerta_diretoria"].apply(as_bool_flag)
-    grid["perc_recebido_total"] = grid["perc_recebido_total"] * 100
-    grid = grid.sort_values(["alerta_diretoria", "diferenca_pendente"], ascending=[False, False]).reset_index(drop=True)
-
-    edited = st.data_editor(
-        grid,
-        width="stretch",
-        hide_index=True,
-        key="director_alert_editor",
-        disabled=[
-            "unidade_padrao",
-            "operadora_padrao",
-            "diferenca_pendente",
-            "perc_recebido_total",
-            "status",
-            "observacoes_consolidadas",
-        ],
-        column_order=[
-            "alerta_diretoria",
-            "unidade_padrao",
-            "operadora_padrao",
-            "diferenca_pendente",
-            "perc_recebido_total",
-            "status",
-            "observacoes_consolidadas",
-        ],
-        column_config={
-            "alerta_diretoria": st.column_config.CheckboxColumn("Vermelho"),
-            "unidade_padrao": st.column_config.TextColumn("Unidade"),
-            "operadora_padrao": st.column_config.TextColumn("Operadora"),
-            "diferenca_pendente": st.column_config.NumberColumn("Dif. pendente", format="R$ %.2f"),
-            "perc_recebido_total": st.column_config.NumberColumn("% recebido", format="%.1f%%"),
-            "status": st.column_config.TextColumn("Status"),
-            "observacoes_consolidadas": st.column_config.TextColumn("Observacoes", width="large"),
-        },
-    )
-
-    left, right = st.columns([1, 4])
-    with left:
-        if st.button("Salvar alertas", type="primary", key="save_director_alerts"):
-            changed = save_director_alerts(edited, base, year)
-            st.success(f"Alertas salvos. {changed} linha(s) alterada(s).")
-            st.rerun()
-    with right:
-        qtd_alerta = int(edited["alerta_diretoria"].apply(as_bool_flag).sum()) if "alerta_diretoria" in edited else 0
-        st.caption(f"{qtd_alerta} linhas marcadas em vermelho no recorte exibido.")
-
-def render_analitico_base_editor(filtered: pd.DataFrame, base: pd.DataFrame, year: int):
-    base = normalize_base_dinamica(base)
-    if filtered.empty:
-        st.info("Nenhuma linha disponivel no recorte atual para editar.")
-        return
-    if base.empty:
-        st.warning("A edicao do analitico depende da base dinamica importada.")
-        return
-
-    visible_keys = set(
-        filtered["unidade_padrao"].apply(norm_text) + "||" + filtered["operadora_padrao"].apply(norm_text)
-    )
-    working = base.copy().reset_index(drop=True)
-    working["_row_id"] = range(len(working))
-    working["_key"] = working["unidade_padrao"].apply(norm_text) + "||" + working["operadora_padrao"].apply(norm_text)
-    editable = working[working["_key"].isin(visible_keys)].copy()
-
-    if editable.empty:
-        st.info("Nenhuma linha da base dinamica corresponde ao recorte exibido.")
-        return
-
-    editable["alerta_diretoria"] = editable["alerta_diretoria"].apply(as_bool_flag)
-    editable = editable.sort_values(["unidade_padrao", "linha_origem", "operadora_padrao"]).reset_index(drop=True)
-
-    value_cols = [
-        "alerta_diretoria",
-        "faturado_marco",
-        "faturado_abril",
-        "faturado_maio",
-        "rec_bruto_marco",
-        "rec_liquido_marco",
-        "rec_bruto_abril",
-        "rec_liquido_abril",
-        "rec_bruto_maio",
-        "rec_liquido_maio",
-        "observacao",
-    ]
-    identity_cols = ["_row_id", "unidade_padrao", "operadora_padrao"]
-    column_order = identity_cols + value_cols
-
-    edited = st.data_editor(
-        editable[column_order],
-        width="stretch",
-        hide_index=True,
-        key="analitico_base_editor",
-        disabled=identity_cols,
-        column_order=column_order,
-        column_config={
-            "_row_id": st.column_config.NumberColumn("ID", format="%d"),
-            "unidade_padrao": st.column_config.TextColumn("Unidade"),
-            "operadora_padrao": st.column_config.TextColumn("Operadora"),
-            "alerta_diretoria": st.column_config.CheckboxColumn("Vermelho"),
-            "faturado_marco": st.column_config.NumberColumn("Faturado Marco", format="R$ %.2f"),
-            "faturado_abril": st.column_config.NumberColumn("Faturado Abril", format="R$ %.2f"),
-            "faturado_maio": st.column_config.NumberColumn("Faturado Maio", format="R$ %.2f"),
-            "rec_bruto_marco": st.column_config.NumberColumn("Rec. Bruto Marco", format="R$ %.2f"),
-            "rec_liquido_marco": st.column_config.NumberColumn("Rec. Liquido Marco", format="R$ %.2f"),
-            "rec_bruto_abril": st.column_config.NumberColumn("Rec. Bruto Abril", format="R$ %.2f"),
-            "rec_liquido_abril": st.column_config.NumberColumn("Rec. Liquido Abril", format="R$ %.2f"),
-            "rec_bruto_maio": st.column_config.NumberColumn("Rec. Bruto Maio", format="R$ %.2f"),
-            "rec_liquido_maio": st.column_config.NumberColumn("Rec. Liquido Maio", format="R$ %.2f"),
-            "observacao": st.column_config.TextColumn("Observacao", width="large"),
-        },
-    )
-
-    left, right = st.columns([1, 4])
-    with left:
-        if st.button("Salvar analitico", type="primary", key="save_analitico_base_editor"):
-            updated = working.drop(columns="_key", errors="ignore").copy()
-            changed_rows = 0
-            for _, row in edited.iterrows():
-                row_id = pd.to_numeric(row.get("_row_id"), errors="coerce")
-                if pd.isna(row_id):
-                    continue
-                row_id = int(row_id)
-                mask = updated["_row_id"] == row_id
-                if not mask.any():
-                    continue
-                before = updated.loc[mask, value_cols].copy()
-                for col in value_cols:
-                    if col == "alerta_diretoria":
-                        updated.loc[mask, col] = int(as_bool_flag(row.get(col, False)))
-                    else:
-                        updated.loc[mask, col] = row.get(col, updated.loc[mask, col].iloc[0])
-                after = updated.loc[mask, value_cols].copy()
-                if not before.reset_index(drop=True).equals(after.reset_index(drop=True)):
-                    changed_rows += 1
-            replace_base_dinamica(updated.drop(columns="_row_id", errors="ignore"), "Edicao analitico consolidado", year=int(year))
-            st.success(f"Analitico salvo. {changed_rows} linha(s) alterada(s).")
-            st.rerun()
-    with right:
-        st.caption(f"Editando {len(editable)} linhas do recorte atual. A tabela de apresentacao acima mantem o mesmo layout.")
-
-def save_director_signal(target_key: str, selected_signal_label: str, base: pd.DataFrame, year: int) -> bool:
-    base = normalize_base_dinamica(base)
-    if base.empty or not target_key:
-        return False
-    signal = DIRECTOR_SIGNAL_VALUES.get(norm_text(selected_signal_label), normalize_director_signal(selected_signal_label))
-    base["_key"] = base["unidade_padrao"].apply(norm_text) + "||" + base["operadora_padrao"].apply(norm_text)
-    mask = base["_key"] == target_key
-    if not mask.any():
-        return False
-    current = base.loc[mask, "sinal_diretoria"].fillna("").astype(str).apply(normalize_director_signal)
-    changed = not current.eq(signal).all()
-    if not changed:
-        return False
-    base.loc[mask, "sinal_diretoria"] = signal
-    base.loc[mask, "alerta_diretoria"] = int(signal == "vermelho")
-    replace_base_dinamica(base.drop(columns="_key", errors="ignore"), "Semaforo diretoria analitico", year=int(year))
-    return changed
-
-def persist_consolidado_inline_action():
-    component_state = st.session_state.get(CONSOLIDADO_INLINE_COMPONENT_KEY)
-    action = getattr(component_state, "action", None) if component_state is not None else None
-    if not isinstance(action, dict):
-        return
-
-    unidade = str(action.get("unidade", "") or "").strip()
-    operadora = str(action.get("operadora", "") or "").strip()
-    action_type = str(action.get("type", "") or "").strip().lower()
-    if not unidade or not operadora:
-        return
-
-    updated_at = datetime.now().strftime("%d/%m/%Y %H:%M")
-    try:
-        if action_type == "signal":
-            signal = normalize_director_signal(action.get("value", ""))
-            _db_execute_sql(
-                """
-                UPDATE base_dinamica
-                SET sinal_diretoria = ?, alerta_diretoria = ?, atualizado_em = ?
-                WHERE unidade_padrao = ? AND operadora_padrao = ?
-                """,
-                (signal, int(signal == "vermelho"), updated_at, unidade, operadora),
-            )
-        elif action_type == "observation":
-            observation = str(action.get("value", "") or "").strip()[:10000]
-            _db_execute_sql(
-                """
-                UPDATE base_dinamica
-                SET observacao = ?, atualizado_em = ?
-                WHERE unidade_padrao = ? AND operadora_padrao = ?
-                """,
-                (observation, updated_at, unidade, operadora),
-            )
-        else:
-            return
-        clear_data_caches()
-    except Exception as exc:
-        st.session_state["consolidado_inline_error"] = f"Nao foi possivel salvar a linha: {exc}"
-
-def consume_director_signal_action(base: pd.DataFrame, year: int) -> bool:
-    target_key = unquote(get_query_param(DIRECTOR_SIGNAL_QUERY_KEY)).strip()
-    if not target_key:
-        return False
-    signal_raw = unquote(get_query_param(DIRECTOR_SIGNAL_QUERY_VALUE)).strip() or "limpar"
-    signal = normalize_director_signal(signal_raw)
-    if target_key and base is not None and not base.empty:
-        changed = save_director_signal(target_key, signal, base, int(year))
-        st.session_state["director_signal_notice"] = "Semaforo atualizado." if changed else "Sem alteracao no semaforo."
-    else:
-        st.session_state["director_signal_notice"] = "Nao foi possivel atualizar o semaforo desta linha."
-    clear_director_signal_query_params()
-    st.rerun()
-    return True
-
-def render_inline_signal_editor(filtered: pd.DataFrame, base: pd.DataFrame, year: int):
-    base = normalize_base_dinamica(base)
-    if filtered.empty or base.empty:
-        return
-
-    options = filtered.copy().reset_index(drop=True)
-    options["_key"] = options["unidade_padrao"].apply(norm_text) + "||" + options["operadora_padrao"].apply(norm_text)
-    options["_label"] = options.apply(
-        lambda row: f"{short_label(row.get('unidade_padrao', ''), 28)} | {short_label(row.get('operadora_padrao', ''), 28)}",
-        axis=1,
-    )
-    key_to_label = dict(zip(options["_key"], options["_label"]))
-    key_to_signal = dict(zip(options["_key"], options.get("sinal_diretoria", pd.Series([""] * len(options))).apply(normalize_director_signal)))
-    keys = list(key_to_label.keys())
-    if not keys:
-        return
-
-    st.markdown('<div class="signal-editor-title">Semaforo diretoria</div>', unsafe_allow_html=True)
-    line_col, color_col, action_col = st.columns([2.4, 1.6, 0.8])
-    with line_col:
-        selected_key = st.selectbox(
-            "Linha",
-            keys,
-            format_func=lambda key: key_to_label.get(key, key),
-            label_visibility="collapsed",
-            key="inline_signal_target",
-        )
-    current_signal = key_to_signal.get(selected_key, "")
-    current_label = DIRECTOR_SIGNAL_LABELS.get(current_signal, "Sem marcador")
-    with color_col:
-        selected_signal = st.radio(
-            "Cor",
-            DIRECTOR_SIGNAL_OPTIONS,
-            index=DIRECTOR_SIGNAL_OPTIONS.index(current_label) if current_label in DIRECTOR_SIGNAL_OPTIONS else 0,
-            horizontal=True,
-            label_visibility="collapsed",
-            key=f"inline_signal_choice_{hashlib.md5(selected_key.encode('utf-8')).hexdigest()}",
-        )
-    with action_col:
-        if st.button("Aplicar", type="primary", use_container_width=True, key="inline_signal_save"):
-            changed = save_director_signal(selected_key, selected_signal, base, int(year))
-            st.success("Semaforo atualizado." if changed else "Sem alteracao no semaforo.")
-            st.rerun()
-
-def render_consolidado_analitico(consolidado: pd.DataFrame, fat_months: list[int], rec_months: list[int], base_dinamica: pd.DataFrame | None = None, year: int = 2026):
-    render_page_header("Consolidado", "Consulta analítica de faturamento e recebimentos por unidade, operadora e mês.")
-    
-    col_t1, col_t2 = st.columns([7, 3])
-    with col_t2:
-        edit_mode = st.toggle("✏️ Ativar Modo de Edição (Excel)", key="consolidado_edit_mode")
-        
-    if edit_mode:
-        st.info("Você está no modo de edição direta! Altere, exclua ou inclua valores na base bruta. As mudanças refletirão no dashboard e nas planilhas.")
-        bd = base_dinamica if base_dinamica is not None else read_base_dinamica(int(year))
-        render_base_dinamica_editor(bd, int(year))
-        return
-        
-    dash = prepare_dashboard_consolidado(consolidado)
-    if dash.empty:
-        st.warning("Ainda não há consolidado disponível para os parâmetros selecionados.")
-        return
-
-    st.markdown('<div class="filter-band-title">Filtros do consolidado</div>', unsafe_allow_html=True)
-    f1, f2, f3, f4, f5 = st.columns([1, 1, 1.2, 0.8, 0.8])
-    with f1:
-        selected_unit = st.selectbox("Unidade", ["Todas Unidades"] + sorted(dash["unidade_padrao"].dropna().unique().tolist()))
-    with f2:
-        selected_operator = st.selectbox("Operadora", ["Todas Operadoras"] + sorted(dash["operadora_padrao"].dropna().unique().tolist()))
-    with f3:
-        selected_status = st.multiselect("Status", sorted(dash["status"].dropna().unique().tolist()), placeholder="Todos")
-    with f4:
-        only_director_alerts = st.checkbox("Somente vermelhos", key="consolidado_only_director_alerts")
-    with f5:
-        sort_order = st.selectbox("Ordem (A-Z)", ["Padrão", "A-Z", "Z-A"])
-
-    scoped = dash.copy()
-    if selected_unit != "Todas Unidades":
-        scoped = scoped[scoped["unidade_padrao"] == selected_unit]
-    if selected_operator != "Todas Operadoras":
-        scoped = scoped[scoped["operadora_padrao"] == selected_operator]
-    if selected_status:
-        scoped = scoped[scoped["status"].isin(selected_status)]
-    filtered = scoped.copy()
-    if only_director_alerts:
-        filtered = filtered[filtered["alerta_diretoria"].apply(as_bool_flag)]
-
-    if filtered.empty:
-        st.info("Nenhum registro encontrado para os filtros selecionados.")
-        return
-
-    total_fat = filtered["faturado"].sum() if "faturado" in filtered else 0
-    total_rec = filtered["total_recebido_bruto"].sum() if "total_recebido_bruto" in filtered else 0
-    total_dif = filtered["diferenca_pendente"].sum() if "diferenca_pendente" in filtered else 0
-    obs_count = int(filtered["observacoes_consolidadas"].fillna("").astype(str).str.strip().ne("").sum()) if "observacoes_consolidadas" in filtered else 0
-    alert_count = int(filtered["alerta_diretoria"].apply(as_bool_flag).sum()) if "alerta_diretoria" in filtered else 0
-
-    render_kpi_row("consolidado", [
-        {"key": "faturamento", "label": "Faturamento", "value": fmt_money(total_fat), "note": "Competência selecionada"},
-        {"key": "recebido_bruto", "label": "Recebido bruto", "value": fmt_money(total_rec), "note": "Total recebido no recorte"},
-        {"key": "diferenca_pendente", "label": "Diferença pendente", "value": fmt_money(total_dif), "note": "Faturamento - recebido", "alert": total_dif > 0},
-        {"key": "observacoes", "label": "Observações", "value": str(obs_count), "note": "Registros com nota fiscal/manual"},
-    ])
-
-    colA, colB = st.columns([8, 2])
-    with colA:
-        st.markdown('<div class="section-title">Consolidado por Unidade e Operadora</div>', unsafe_allow_html=True)
-    with colB:
-        import io
-        buf = io.BytesIO()
-        with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
-            filtered.to_excel(writer, index=False, sheet_name="Consolidado")
-            wb = writer.book
-            ws = writer.sheets["Consolidado"]
-            money_fmt = wb.add_format({"num_format": 'R$ #,##0.00', "border": 1})
-            pct_fmt = wb.add_format({"num_format": '0.00%', "border": 1})
-            header_fmt = wb.add_format({"bold": True, "font_color": "white", "bg_color": "#17365D", "border": 1})
-            
-            for col_num, value in enumerate(filtered.columns.values):
-                ws.write(0, col_num, value, header_fmt)
-                col_name = str(value).lower()
-                if "faturado" in col_name or "recebido" in col_name or "diferenca" in col_name or "valor" in col_name:
-                    ws.set_column(col_num, col_num, 18, money_fmt)
-                elif "perc" in col_name or "%" in col_name:
-                    ws.set_column(col_num, col_num, 12, pct_fmt)
-                else:
-                    ws.set_column(col_num, col_num, 30)
-
-        st.download_button(
-            "📥 Extrair para Excel",
-            data=buf.getvalue(),
-            file_name=f"Consolidado_Analitico_{year}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
 
     # Apply sort_order before rendering the sheet table
     work = filtered.copy()
@@ -5291,7 +3801,8 @@ def render_consolidado_analitico(consolidado: pd.DataFrame, fat_months: list[int
         work["ordem_base_dinamica"] = pd.to_numeric(work["ordem_base_dinamica"], errors="coerce").fillna(999999)
         work = work.sort_values(["ordem_base_dinamica", "operadora_padrao"], ascending=[True, True])
     
-    render_consolidado_sheet_table(work, fat_months, rec_months, int(year))
+    base_df = read_table('base_dinamica')
+    render_analitico_base_editor(work, base_df, fat_months, rec_months)
     st.caption(f"Mostrando {len(work)} linhas analíticas, agrupadas por {work['unidade_padrao'].nunique()} unidades. Última sincronização: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
 
 def render_lancamentos_manuais_tab():
@@ -5343,6 +3854,110 @@ def render_lancamentos_manuais_tab():
         st.rerun()
 
 @st.fragment
+
+def inline_consolidado_excel_bytes(consolidado: pd.DataFrame) -> bytes:
+    import io
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        money_cols = [c for c in consolidado.columns if c.startswith("fat_") or c.startswith("rec_")]
+        
+        vis_rows = []
+        if "ordem_base_dinamica" not in consolidado:
+            consolidado["ordem_base_dinamica"] = range(1, len(consolidado) + 1)
+        
+        work = consolidado.copy()
+        work["ordem_base_dinamica"] = pd.to_numeric(work["ordem_base_dinamica"], errors="coerce").fillna(999999)
+        unit_order = work.groupby("unidade_padrao", dropna=False)["ordem_base_dinamica"].min().sort_values().index.tolist()
+        
+        total_row_indices = []
+        current_idx = 1
+        
+        for unidade in unit_order:
+            group = work[work["unidade_padrao"].astype(str) == str(unidade)]
+            
+            row = {"UNIDADE / OPERADORA": str(unidade)}
+            for c in consolidado.columns:
+                if c not in ["UNIDADE / OPERADORA", "unidade_padrao", "operadora_padrao", "ordem_base_dinamica"]:
+                    if c in money_cols:
+                        row[c] = pd.to_numeric(group[c], errors="coerce").fillna(0).sum()
+                    else:
+                        row[c] = ""
+            vis_rows.append(row)
+            total_row_indices.append(current_idx)
+            current_idx += 1
+            
+            details = group.sort_values(["ordem_base_dinamica", "operadora_padrao"])
+            for _, detail in details.iterrows():
+                d_row = {"UNIDADE / OPERADORA": str(detail.get("operadora_padrao", ""))}
+                for c in consolidado.columns:
+                    if c not in ["UNIDADE / OPERADORA", "unidade_padrao", "operadora_padrao", "ordem_base_dinamica"]:
+                        d_row[c] = detail.get(c, "")
+                vis_rows.append(d_row)
+                current_idx += 1
+                
+        consolidado_vis = pd.DataFrame(vis_rows)
+        cols_to_drop = ["unidade_padrao", "operadora_padrao", "ordem_base_dinamica", "sinal_diretoria", "alerta_diretoria"]
+        consolidado_vis = consolidado_vis.drop(columns=[c for c in cols_to_drop if c in consolidado_vis], errors="ignore")
+        
+        rename_dict = {}
+        for c in consolidado_vis.columns:
+            if c.startswith("fat_"):
+                month = c.split("_")[1]
+                rename_dict[c] = f"FATURADO {MONTHS.get(int(month), month).upper()}" if month.isdigit() else f"FATURADO {month.upper()}"
+            elif c.startswith("rec_bruto_"):
+                month = c.split("_")[2]
+                rename_dict[c] = f"REC. BRUTO {MONTHS.get(int(month), month).upper()}" if month.isdigit() else f"REC. BRUTO {month.upper()}"
+            elif c.startswith("rec_liquido_"):
+                month = c.split("_")[2]
+                rename_dict[c] = f"REC. LÍQUIDO {MONTHS.get(int(month), month).upper()}" if month.isdigit() else f"REC. LÍQUIDO {month.upper()}"
+            elif c == "observacoes_consolidadas":
+                rename_dict[c] = "OBSERVAÇÃO"
+        consolidado_vis = consolidado_vis.rename(columns=rename_dict)
+        
+        consolidado_vis.to_excel(writer, sheet_name="Consolidado", index=False)
+        
+        wb = writer.book
+        money_fmt = wb.add_format({"num_format": 'R$ #,##0.00', "border": 1})
+        faturamento_money_fmt = wb.add_format({"num_format": 'R$ #,##0.00', "border": 1, "bg_color": "#FFF2CC", "font_color": "#000000"})
+        pct_fmt = wb.add_format({"num_format": '0.00%', "border": 1})
+        header_fmt = wb.add_format({"bold": True, "font_color": "white", "bg_color": "#17365D", "border": 1})
+        faturamento_header_fmt = wb.add_format({"bold": True, "font_color": "#000000", "bg_color": "#FFC000", "border": 1})
+        unit_total_fmt = wb.add_format({"bold": True, "bg_color": "#DDEBF7", "border": 1, "top": 2, "bottom": 2})
+        unit_total_money_fmt = wb.add_format({"bold": True, "bg_color": "#DDEBF7", "border": 1, "top": 2, "bottom": 2, "num_format": 'R$ #,##0.00'})
+        
+        ws = writer.sheets["Consolidado"]
+        ws.freeze_panes(1, 0)
+        
+        for col_num, col_name in enumerate(consolidado_vis.columns):
+            c = str(col_name).lower()
+            is_faturamento = "faturado" in c or "faturamento" in c or "fat_" in c
+            ws.write(0, col_num, col_name, faturamento_header_fmt if is_faturamento else header_fmt)
+            width = min(max(len(str(col_name)) + 2, 12), 48)
+            if col_name == "UNIDADE / OPERADORA": width = 35
+            if col_name == "OBSERVAÇÃO" or "obs" in c: width = 50
+            ws.set_column(col_num, col_num, width)
+            
+        for idx, col in enumerate(consolidado_vis.columns):
+            c = str(col).lower()
+            is_faturamento = "faturado" in c or "faturamento" in c or "fat_" in c
+            is_money = any(k in c for k in ["valor", "faturado", "recebido", "diferenca", "rec_bruto", "rec_liquido", "bruto", "liquido", "fat_"])
+            
+            if is_money:
+                ws.set_column(idx, idx, 18, faturamento_money_fmt if is_faturamento else money_fmt)
+            elif "perc" in c or "%" in c:
+                ws.set_column(idx, idx, 14, pct_fmt)
+                
+        for row_idx in total_row_indices:
+            for col_num, col_name in enumerate(consolidado_vis.columns):
+                c = str(col_name).lower()
+                is_money = any(k in c for k in ["valor", "faturado", "recebido", "diferenca", "rec_bruto", "rec_liquido", "bruto", "liquido", "fat_"])
+                val = consolidado_vis.iloc[row_idx - 1, col_num]
+                if pd.isna(val): val = ""
+                ws.write(row_idx, col_num, val, unit_total_money_fmt if is_money else unit_total_fmt)
+                
+        output.seek(0)
+        return output.read()
+
 def render_consolidado_tabs(
     dash: pd.DataFrame,
     filtered: pd.DataFrame,
@@ -5362,29 +3977,10 @@ def render_consolidado_tabs(
             st.markdown('<div class="section-title">Consolidado por Unidade e Operadora</div>', unsafe_allow_html=True)
         with colB:
             # Exportação bem formatada
-            import io
-            buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
-                filtered.to_excel(writer, index=False, sheet_name="Consolidado")
-                wb = writer.book
-                ws = writer.sheets["Consolidado"]
-                money_fmt = wb.add_format({"num_format": 'R$ #,##0.00', "border": 1})
-                pct_fmt = wb.add_format({"num_format": '0.00%', "border": 1})
-                header_fmt = wb.add_format({"bold": True, "font_color": "white", "bg_color": "#17365D", "border": 1})
-                
-                for col_num, value in enumerate(filtered.columns.values):
-                    ws.write(0, col_num, value, header_fmt)
-                    col_name = str(value).lower()
-                    if "faturado" in col_name or "recebido" in col_name or "diferenca" in col_name or "valor" in col_name:
-                        ws.set_column(col_num, col_num, 18, money_fmt)
-                    elif "perc" in col_name or "%" in col_name:
-                        ws.set_column(col_num, col_num, 12, pct_fmt)
-                    else:
-                        ws.set_column(col_num, col_num, 30)
-
+            excel_bytes = inline_consolidado_excel_bytes(filtered)
             st.download_button(
                 "📥 Extrair para Excel",
-                data=buf.getvalue(),
+                data=excel_bytes,
                 file_name=f"Consolidado_Analitico_{year}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
@@ -5549,6 +4145,49 @@ def render_view_preferences(consolidado: pd.DataFrame, fat_months: list[int], re
                 labels,
                 locked={"unidade_padrao", "operadora_padrao"},
             )
+
+def render_consolidado_analitico(consolidado: pd.DataFrame, fat_months: list[int], rec_months: list[int], base_dinamica: pd.DataFrame | None = None, year: int = 2026):
+    render_page_header("Consolidado", "Consulta analitica de faturamento e recebimentos por unidade, operadora e mes.")
+    dash = prepare_dashboard_consolidado(consolidado)
+    if dash.empty:
+        st.warning("Ainda nao ha consolidado disponivel para os parametros selecionados.")
+        return
+
+    st.markdown('<div class="filter-band-title">Filtros do consolidado</div>', unsafe_allow_html=True)
+    f1, f2, f3, f4 = st.columns([1, 1, 1.4, 0.9])
+    with f1:
+        selected_unit = st.selectbox("Unidade", ["Todas Unidades"] + sorted(dash["unidade_padrao"].dropna().unique().tolist()))
+    with f2:
+        selected_operator = st.selectbox("Operadora", ["Todas Operadoras"] + sorted(dash["operadora_padrao"].dropna().unique().tolist()))
+    with f3:
+        selected_status = st.multiselect("Status", sorted(dash["status"].dropna().unique().tolist()), placeholder="Todos")
+    with f4:
+        only_director_alerts = st.checkbox("Somente vermelhos", key="consolidado_only_director_alerts")
+
+    scoped = dash.copy()
+    if selected_unit != "Todas Unidades":
+        scoped = scoped[scoped["unidade_padrao"] == selected_unit]
+    if selected_operator != "Todas Operadoras":
+        scoped = scoped[scoped["operadora_padrao"] == selected_operator]
+    if selected_status:
+        scoped = scoped[scoped["status"].isin(selected_status)]
+    if only_director_alerts:
+        if "alerta_diretoria" in scoped:
+            scoped = scoped[scoped["alerta_diretoria"].apply(as_bool_flag)]
+
+    total_fat = scoped["faturado"].sum() if "faturado" in scoped else 0
+    total_rec = scoped["total_recebido_bruto"].sum() if "total_recebido_bruto" in scoped else 0
+    total_dif = scoped["diferenca_pendente"].sum() if "diferenca_pendente" in scoped else 0
+    obs_count = int(scoped["observacoes_consolidadas"].fillna("").astype(str).str.strip().ne("").sum()) if "observacoes_consolidadas" in scoped else 0
+
+    render_kpi_row("consolidado", [
+        {"key": "faturamento", "label": "Faturamento", "value": fmt_money(total_fat), "note": "Competência selecionada"},
+        {"key": "recebido_bruto", "label": "Recebido Bruto", "value": fmt_money(total_rec), "note": "Geral acumulado"},
+        {"key": "diferenca_pendente", "label": "Diferença Pendente", "value": fmt_money(total_dif), "note": "A receber"},
+        {"key": "observacoes", "label": "Observações Fiscais", "value": str(obs_count), "note": "Total registradas"},
+    ])
+
+    render_consolidado_tabs(dash, scoped, fat_months, rec_months, year)
 
 def render_comentarios_financeiros(consolidado: pd.DataFrame, mes_referencia: int, ano_referencia: int):
     ensure_comentarios_table()
