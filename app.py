@@ -2246,15 +2246,28 @@ def merge_manual_comments(consolidado: pd.DataFrame, ano: int, meses: list[int])
     return add_observacoes_consolidadas(out)
 
 def merge_base_dinamica_observations(consolidado: pd.DataFrame, base_dinamica: pd.DataFrame) -> pd.DataFrame:
-    if consolidado.empty or base_dinamica is None or base_dinamica.empty or "observacao" not in base_dinamica:
+    if consolidado.empty or base_dinamica is None or base_dinamica.empty:
         return consolidado
-    base = normalize_base_dinamica(base_dinamica)
-    if base.empty:
+    # Determina a coluna de observação disponível
+    obs_col = None
+    if "observacao" in base_dinamica.columns:
+        obs_col = "observacao"
+    elif "observacao_fiscal" in base_dinamica.columns:
+        obs_col = "observacao_fiscal"
+    if obs_col is None:
         return consolidado
+    base = base_dinamica.copy()
+    # Garante colunas necessárias
+    for col in ["unidade_padrao", "operadora_padrao", "sinal_diretoria", "alerta_diretoria"]:
+        if col not in base.columns:
+            base[col] = "" if col != "alerta_diretoria" else 0
+    # Coluna de ordem (pode não existir no schema novo)
+    if "linha_origem" not in base.columns:
+        base["linha_origem"] = range(1, len(base) + 1)
     grouped = (
         base.groupby(["unidade_padrao", "operadora_padrao"], dropna=False)
         .agg(
-            observacao_dinamica=("observacao", lambda values: " | ".join(dict.fromkeys(str(v).strip() for v in values if str(v).strip()))),
+            observacao_dinamica=(obs_col, lambda values: " | ".join(dict.fromkeys(str(v).strip() for v in values if str(v).strip()))),
             alerta_diretoria_base=("alerta_diretoria", lambda values: int(pd.to_numeric(values, errors="coerce").fillna(0).max() > 0)),
             sinal_diretoria_base=("sinal_diretoria", aggregate_director_signal),
             ordem_base_dinamica=("linha_origem", "min"),
@@ -2601,21 +2614,29 @@ def build_consolidado_inline_payload(filtered: pd.DataFrame, fat_months: list[in
         "kind": "observation",
     })
 
-    fresh_base = normalize_base_dinamica(read_table("base_dinamica"))
+    fresh_base = read_table("base_dinamica")
     fresh_lookup: dict[str, dict] = {}
     if not fresh_base.empty:
         fresh_base = fresh_base.copy()
+        # Determina qual coluna de observação existe no DB
+        obs_col = "observacao" if "observacao" in fresh_base.columns else (
+            "observacao_fiscal" if "observacao_fiscal" in fresh_base.columns else None
+        )
+        if "sinal_diretoria" not in fresh_base.columns:
+            fresh_base["sinal_diretoria"] = ""
         fresh_base["_key"] = (
-            fresh_base["unidade_padrao"].apply(norm_text)
+            fresh_base["unidade_padrao"].fillna("").astype(str).apply(norm_text)
             + "||"
-            + fresh_base["operadora_padrao"].apply(norm_text)
+            + fresh_base["operadora_padrao"].fillna("").astype(str).apply(norm_text)
         )
         for key, group in fresh_base.groupby("_key", dropna=False):
-            observations = [
-                str(value).strip()
-                for value in group["observacao"].fillna("").astype(str)
-                if str(value).strip()
-            ]
+            observations = []
+            if obs_col:
+                observations = [
+                    str(value).strip()
+                    for value in group[obs_col].fillna("").astype(str)
+                    if str(value).strip()
+                ]
             fresh_lookup[str(key)] = {
                 "signal": aggregate_director_signal(group["sinal_diretoria"]),
                 "observation": " | ".join(dict.fromkeys(observations)),
@@ -5199,10 +5220,14 @@ def persist_consolidado_inline_action():
             )
         elif action_type == "observation":
             observation = str(action.get("value", "") or "").strip()[:10000]
+            # Tenta atualizar usando o nome real da coluna no DB
+            # A coluna pode ser 'observacao' (schema legado) ou 'observacao_fiscal' (schema atual)
+            db_cols = _db_table_columns("base_dinamica")
+            obs_col_name = "observacao_fiscal" if "observacao_fiscal" in db_cols else "observacao"
             _db_execute_sql(
-                """
+                f"""
                 UPDATE base_dinamica
-                SET observacao = ?, atualizado_em = ?
+                SET {obs_col_name} = ?, atualizado_em = ?
                 WHERE unidade_padrao = ? AND operadora_padrao = ?
                 """,
                 (observation, updated_at, unidade, operadora),
@@ -5258,10 +5283,6 @@ def persist_consolidado_inline_action():
                         }])
                         cont_df = pd.concat([cont_df, new_cont], ignore_index=True)
                     write_table("contabilidade", cont_df)
-                    
-                # Ensure the backend re-runs the ETL to merge the new faturamento/recebimento synchronously
-                import subprocess
-                subprocess.run([sys.executable, "data_engineering.py"], check=True)
         else:
             return
         clear_data_caches()
