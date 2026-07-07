@@ -408,7 +408,7 @@ export default function(component) {
 
                 td.appendChild(observationWrap);
             } else if ((column.kind === "money" || column.kind === "fat") && isDetail) {
-                const rawValue = row.values?.[column.key] || "";
+                let rawValue = row.values?.[column.key] || "";
                 const display = document.createElement("span");
                 display.className = "editable-value";
                 display.textContent = rawValue;
@@ -450,6 +450,8 @@ export default function(component) {
                             ? ""
                             : "R$ " + numVal.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
                         display.innerHTML = formatted || "&nbsp;";
+                        
+                        rawValue = String(numVal);
                         td.replaceChildren(display);
                         sendAction({
                             type: "value_edit",

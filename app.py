@@ -2733,6 +2733,81 @@ def dashboard_bar_chart_html(rec_df: pd.DataFrame) -> str:
         )
     return f'<div class="dashboard-chart">{"".join(bars)}</div>'
 
+import pandas as pd
+import io
+
+def generate_consolidado_inline_excel(payload: dict) -> bytes:
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        pd.DataFrame().to_excel(writer, index=False, sheet_name="Consolidado")
+        wb = writer.book
+        ws = writer.sheets["Consolidado"]
+        ws.freeze_panes(1, 0)
+        
+        # Formats
+        header_fmt = wb.add_format({"bold": True, "font_color": "white", "bg_color": "#17365D", "border": 1, "align": "center", "valign": "vcenter"})
+        header_fat_fmt = wb.add_format({"bold": True, "font_color": "#000000", "bg_color": "#FFD966", "border": 1, "align": "center", "valign": "vcenter"})
+        
+        unit_fmt = wb.add_format({"bold": True, "bg_color": "#002E7A", "font_color": "white", "border": 1})
+        unit_money_fmt = wb.add_format({"bold": True, "bg_color": "#002E7A", "font_color": "white", "border": 1, "align": "right", "num_format": 'R$ #,##0.00'})
+        
+        detail_fmt = wb.add_format({"border": 1})
+        detail_money_fmt = wb.add_format({"border": 1, "align": "right", "num_format": 'R$ #,##0.00'})
+        detail_fat_money_fmt = wb.add_format({"border": 1, "align": "right", "bg_color": "#F2F2F2", "num_format": 'R$ #,##0.00'})
+        obs_fmt = wb.add_format({"border": 1, "bg_color": "#FFF2CC"})
+        
+        # Write headers
+        columns = payload["columns"]
+        for col_idx, col in enumerate(columns):
+            label = str(col["label"]).upper()
+            fmt = header_fat_fmt if col["kind"] == "fat" else header_fmt
+            ws.write(0, col_idx, label, fmt)
+            
+            # Set column widths
+            if col["key"] == "label":
+                ws.set_column(col_idx, col_idx, 35)
+            elif col["kind"] == "observation":
+                ws.set_column(col_idx, col_idx, 50)
+            else:
+                ws.set_column(col_idx, col_idx, 18)
+        
+        # Write rows
+        current_row = 1
+        for row in payload["rows"]:
+            if row["type"] == "unit":
+                ws.write(current_row, 0, str(row["label"]).upper(), unit_fmt)
+                for col_idx, col in enumerate(columns[1:], 1):
+                    if col["kind"] in ("money", "fat"):
+                        val = row["values"].get(col["key"], "")
+                        try:
+                            if val: val = float(val)
+                        except: pass
+                        ws.write(current_row, col_idx, val if val != "" else 0, unit_money_fmt)
+                    elif col["kind"] == "observation":
+                        ws.write(current_row, col_idx, "", unit_fmt)
+            else:
+                operadora = row["label"]
+                if row.get("signal"):
+                    operadora = f"[{row['signal'].upper()}] {operadora}"
+                ws.write(current_row, 0, operadora, detail_fmt)
+                
+                for col_idx, col in enumerate(columns[1:], 1):
+                    if col["kind"] in ("money", "fat"):
+                        val = row["values"].get(col["key"], "")
+                        try:
+                            if val: val = float(val)
+                        except: pass
+                        fmt = detail_fat_money_fmt if col["kind"] == "fat" else detail_money_fmt
+                        ws.write(current_row, col_idx, val if val != "" else 0, fmt)
+                    elif col["kind"] == "observation":
+                        obs = str(row.get("observation", ""))
+                        if row.get("manualComment"):
+                            obs = f"{obs} | Manual: {row['manualComment']}" if obs else f"Manual: {row['manualComment']}"
+                        ws.write(current_row, col_idx, obs, obs_fmt)
+            current_row += 1
+            
+    return output.getvalue()
+
 @st.cache_data(show_spinner=False)
 def df_to_excel_bytes(consolidado: pd.DataFrame, fat: pd.DataFrame, cont: pd.DataFrame, inconsistencias: pd.DataFrame) -> bytes:
     import io
@@ -5132,6 +5207,61 @@ def persist_consolidado_inline_action():
                 """,
                 (observation, updated_at, unidade, operadora),
             )
+        elif action_type == "value_edit":
+            col_key = str(action.get("column", ""))
+            value = action.get("value", "")
+            if col_key:
+                numeric_val = float(str(value).replace("R$", "").replace(".", "").replace(",", ".").strip() or 0)
+                # Atualiza na base_dinamica (opcional, para exibir imediatamente)
+                _db_execute_sql(
+                    f"UPDATE base_dinamica SET {col_key} = ? WHERE unidade_padrao = ? AND operadora_padrao = ?",
+                    (numeric_val, unidade, operadora)
+                )
+                
+                # Atualiza diretamente a tabela de faturamento se for faturamento
+                if col_key.startswith("fat_"):
+                    month = int(col_key.split("_")[1])
+                    fat_df = read_table("faturamento")
+                    fat_mask = (fat_df["unidade_padrao"].apply(norm_text) == norm_text(unidade)) & \
+                               (fat_df["operadora_padrao"].apply(norm_text) == norm_text(operadora)) & \
+                               (fat_df["mes_faturamento"] == month)
+                    if fat_mask.any():
+                        fat_df.loc[fat_mask, "valor_faturado"] = numeric_val
+                    else:
+                        new_fat = pd.DataFrame([{
+                            "nf": f"INLINE-FAT-{month:02d}", "unidade_original": unidade, "unidade_padrao": unidade,
+                            "operadora_original": operadora, "operadora_padrao": operadora, "paciente": "",
+                            "valor_faturado": numeric_val, "mes_faturamento": month, "ano_faturamento": 2026,
+                            "origem_arquivo": "EDICAO_INLINE", "fonte": "MANUAL"
+                        }])
+                        fat_df = pd.concat([fat_df, new_fat], ignore_index=True)
+                    write_table("faturamento", fat_df)
+                    
+                elif col_key.startswith("rec_bruto_") or col_key.startswith("rec_liquido_"):
+                    month = int(col_key.split("_")[-1])
+                    is_bruto = "bruto" in col_key
+                    cont_df = read_table("contabilidade")
+                    cont_mask = (cont_df["unidade_padrao"].apply(norm_text) == norm_text(unidade)) & \
+                                (cont_df["operadora_padrao"].apply(norm_text) == norm_text(operadora)) & \
+                                (cont_df["mes_recebimento"] == month)
+                    if cont_mask.any():
+                        cont_df.loc[cont_mask, "valor_bruto" if is_bruto else "valor_liquido"] = numeric_val
+                    else:
+                        new_cont = pd.DataFrame([{
+                            "nf": f"INLINE-REC-{month:02d}", "unidade_original": unidade, "unidade_padrao": unidade,
+                            "operadora_original": operadora, "operadora_padrao": operadora,
+                            "valor_bruto": numeric_val if is_bruto else 0,
+                            "valor_liquido": numeric_val if not is_bruto else 0,
+                            "data_pago": pd.NaT, "mes_recebimento": month, "ano_recebimento": 2026,
+                            "observacao_original": "", "observacao_fiscal": "",
+                            "origem_arquivo": "EDICAO_INLINE", "fonte": "MANUAL"
+                        }])
+                        cont_df = pd.concat([cont_df, new_cont], ignore_index=True)
+                    write_table("contabilidade", cont_df)
+                    
+                # Ensure the backend re-runs the ETL to merge the new faturamento/recebimento synchronously
+                import subprocess
+                subprocess.run([sys.executable, "data_engineering.py"], check=True)
         else:
             return
         clear_data_caches()
@@ -5338,30 +5468,13 @@ def render_consolidado_tabs(
         with colA:
             st.markdown('<div class="section-title">Consolidado por Unidade e Operadora</div>', unsafe_allow_html=True)
         with colB:
-            # Exportação bem formatada
-            import io
-            buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
-                filtered.to_excel(writer, index=False, sheet_name="Consolidado")
-                wb = writer.book
-                ws = writer.sheets["Consolidado"]
-                money_fmt = wb.add_format({"num_format": 'R$ #,##0.00', "border": 1})
-                pct_fmt = wb.add_format({"num_format": '0.00%', "border": 1})
-                header_fmt = wb.add_format({"bold": True, "font_color": "white", "bg_color": "#17365D", "border": 1})
-                
-                for col_num, value in enumerate(filtered.columns.values):
-                    ws.write(0, col_num, value, header_fmt)
-                    col_name = str(value).lower()
-                    if "faturado" in col_name or "recebido" in col_name or "diferenca" in col_name or "valor" in col_name:
-                        ws.set_column(col_num, col_num, 18, money_fmt)
-                    elif "perc" in col_name or "%" in col_name:
-                        ws.set_column(col_num, col_num, 12, pct_fmt)
-                    else:
-                        ws.set_column(col_num, col_num, 30)
+            # Exportação bem formatada usando o layout da tela
+            payload = build_consolidado_inline_payload(filtered, fat_months, rec_months)
+            excel_bytes = generate_consolidado_inline_excel(payload)
 
             st.download_button(
                 "📥 Extrair para Excel",
-                data=buf.getvalue(),
+                data=excel_bytes,
                 file_name=f"Consolidado_Analitico_{year}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
