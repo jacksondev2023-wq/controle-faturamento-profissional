@@ -416,6 +416,8 @@ export default function(component) {
                 display.style.cursor = "pointer";
                 display.style.display = "block";
                 display.style.width = "100%";
+                display.style.minHeight = "20px";
+                if (!rawValue) display.innerHTML = "&nbsp;";
 
                 display.addEventListener("click", () => {
                     const input = document.createElement("input");
@@ -441,7 +443,7 @@ export default function(component) {
                         const formatted = isNaN(numVal) || Math.abs(numVal) < 0.005
                             ? ""
                             : "R$ " + numVal.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-                        display.textContent = formatted;
+                        display.innerHTML = formatted || "&nbsp;";
                         td.replaceChildren(display);
                         sendAction({
                             type: "value_edit",

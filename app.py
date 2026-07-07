@@ -2665,7 +2665,7 @@ def build_consolidado_inline_payload(filtered: pd.DataFrame, fat_months: list[in
                 observation = str(fresh.get("observation", "") or "")
             else:
                 signal = normalize_director_signal(detail.get("sinal_diretoria", ""))
-                observation = str(detail.get("observacao_fiscal", "") or "").strip()
+                observation = str(detail.get("observacoes_consolidadas", "") or "").strip()
 
             if not signal and as_bool_flag(detail.get("alerta_diretoria", 0)):
                 signal = "vermelho"
