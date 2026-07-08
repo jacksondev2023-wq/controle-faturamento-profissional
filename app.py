@@ -2283,7 +2283,32 @@ def merge_base_dinamica_observations(consolidado: pd.DataFrame, base_dinamica: p
     legacy_red = (pd.to_numeric(out.get("alerta_diretoria_base", 0), errors="coerce").fillna(0) > 0) & (out["sinal_diretoria"] == "")
     out.loc[legacy_red, "sinal_diretoria"] = "vermelho"
     out["alerta_diretoria"] = (out["sinal_diretoria"] == "vermelho").astype(int)
-    return out.drop(columns=["observacao_dinamica", "alerta_diretoria_base", "sinal_diretoria_base"], errors="ignore")
+    out = out.drop(columns=["observacao_dinamica", "alerta_diretoria_base", "sinal_diretoria_base"], errors="ignore")
+
+    # Enriquece com observações históricas do consolidado_historico
+    # para linhas que ainda não têm observacao_fiscal preenchida
+    try:
+        hist = read_table("consolidado_historico")
+        if not hist.empty and "observacao_fiscal" in hist.columns:
+            hist_obs = (
+                hist[hist["observacao_fiscal"].fillna("").astype(str).str.strip().ne("")]
+                .groupby(["unidade_padrao", "operadora_padrao"])["observacao_fiscal"]
+                .apply(lambda vals: " | ".join(dict.fromkeys(
+                    v.strip() for v in vals.fillna("").astype(str) if v.strip()
+                )))
+                .reset_index()
+                .rename(columns={"observacao_fiscal": "_hist_obs"})
+            )
+            if not hist_obs.empty:
+                out = out.merge(hist_obs, on=["unidade_padrao", "operadora_padrao"], how="left")
+                # Só preenche onde observacao_fiscal está vazia
+                empty_mask = out["observacao_fiscal"].fillna("").astype(str).str.strip() == ""
+                out.loc[empty_mask, "observacao_fiscal"] = out.loc[empty_mask, "_hist_obs"].fillna("")
+                out = out.drop(columns=["_hist_obs"], errors="ignore")
+    except Exception:
+        pass  # consolidado_historico pode não existir
+
+    return out
 
 def consolidado_pivot_column_spec(filtered: pd.DataFrame, fat_months: list[int], rec_months: list[int]) -> tuple[list[str], dict[str, str], set[str], set[str]]:
     display_cols = ["unidade_padrao", "operadora_padrao"]
@@ -2641,6 +2666,39 @@ def build_consolidado_inline_payload(filtered: pd.DataFrame, fat_months: list[in
                 "signal": aggregate_director_signal(group["sinal_diretoria"]),
                 "observation": " | ".join(dict.fromkeys(observations)),
             }
+
+    # Enriquece com observações históricas de consolidado_historico
+    # (28 pares unidade+operadora com observacao_fiscal preenchida)
+    try:
+        hist_table = read_table("consolidado_historico")
+        if not hist_table.empty and "observacao_fiscal" in hist_table.columns:
+            hist_with_obs = hist_table[
+                hist_table["observacao_fiscal"].fillna("").astype(str).str.strip().ne("")
+            ].copy()
+            if not hist_with_obs.empty:
+                hist_with_obs["_key"] = (
+                    hist_with_obs["unidade_padrao"].fillna("").astype(str).apply(norm_text)
+                    + "||"
+                    + hist_with_obs["operadora_padrao"].fillna("").astype(str).apply(norm_text)
+                )
+                hist_obs_map = (
+                    hist_with_obs.groupby("_key")["observacao_fiscal"]
+                    .apply(lambda vals: " | ".join(dict.fromkeys(
+                        v.strip() for v in vals.fillna("").astype(str) if v.strip()
+                    )))
+                    .to_dict()
+                )
+                for key, obs_text in hist_obs_map.items():
+                    if not obs_text:
+                        continue
+                    if key in fresh_lookup:
+                        # Só adiciona do histórico se base_dinamica não tiver observação
+                        if not fresh_lookup[key].get("observation"):
+                            fresh_lookup[key]["observation"] = obs_text
+                    else:
+                        fresh_lookup[key] = {"signal": "", "observation": obs_text}
+    except Exception:
+        pass  # consolidado_historico pode não existir em todos os ambientes
 
     work = filtered.copy()
     if "ordem_base_dinamica" not in work:
