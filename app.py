@@ -2693,6 +2693,8 @@ def build_consolidado_inline_payload(filtered: pd.DataFrame, fat_months: list[in
             if not signal and as_bool_flag(detail.get("alerta_diretoria", 0)):
                 signal = "vermelho"
 
+            values_dict = {col: money_or_blank(detail.get(col, 0)) for col in money_cols}
+            values_dict["observacoes_consolidadas"] = str(detail.get("observacoes_consolidadas", "") or "").strip()
             detail_rows.append({
                 "type": "detail",
                 "unidade": unidade_value,
@@ -2701,7 +2703,7 @@ def build_consolidado_inline_payload(filtered: pd.DataFrame, fat_months: list[in
                 "signal": signal,
                 "observation": observation,
                 "manualComment": str(detail.get("comentario_manual", "") or "").strip(),
-                "values": {col: money_or_blank(detail.get(col, 0)) for col in money_cols},
+                "values": values_dict,
             })
 
         unit_signal = aggregate_director_signal(row["signal"] for row in detail_rows)
@@ -2785,10 +2787,10 @@ def generate_consolidado_inline_excel(payload: dict) -> bytes:
             ws.write(0, col_idx, label, fmt)
             
             # Set column widths
-            if col["key"] == "label":
-                ws.set_column(col_idx, col_idx, 35)
+            if col["key"] == "linha_label":
+                ws.set_column(col_idx, col_idx, 38)
             elif col["kind"] == "observation":
-                ws.set_column(col_idx, col_idx, 50)
+                ws.set_column(col_idx, col_idx, 55)
             else:
                 ws.set_column(col_idx, col_idx, 18)
         
@@ -2821,9 +2823,13 @@ def generate_consolidado_inline_excel(payload: dict) -> bytes:
                         fmt = detail_fat_money_fmt if col["kind"] == "fat" else detail_money_fmt
                         ws.write(current_row, col_idx, val if val != "" else 0, fmt)
                     elif col["kind"] == "observation":
-                        obs = str(row.get("observation", ""))
+                        # Pega observacao do fresh_lookup (row.observation) ou do consolidado (values dict)
+                        obs = str(row.get("observation", "") or "").strip()
+                        if not obs:
+                            obs = str(row.get("values", {}).get("observacoes_consolidadas", "") or "").strip()
                         if row.get("manualComment"):
-                            obs = f"{obs} | Manual: {row['manualComment']}" if obs else f"Manual: {row['manualComment']}"
+                            manual = str(row["manualComment"]).strip()
+                            obs = f"{obs} | Manual: {manual}" if obs else f"Manual: {manual}"
                         ws.write(current_row, col_idx, obs, obs_fmt)
             current_row += 1
             
