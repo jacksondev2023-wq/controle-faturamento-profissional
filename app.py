@@ -2287,24 +2287,46 @@ def merge_base_dinamica_observations(consolidado: pd.DataFrame, base_dinamica: p
 
     # Enriquece com observações históricas do consolidado_historico
     # para linhas que ainda não têm observacao_fiscal preenchida
+    # Usa match exato + fallback por substring (cobre nomes que mudaram entre meses)
     try:
         hist = read_table("consolidado_historico")
         if not hist.empty and "observacao_fiscal" in hist.columns:
-            hist_obs = (
-                hist[hist["observacao_fiscal"].fillna("").astype(str).str.strip().ne("")]
-                .groupby(["unidade_padrao", "operadora_padrao"])["observacao_fiscal"]
-                .apply(lambda vals: " | ".join(dict.fromkeys(
-                    v.strip() for v in vals.fillna("").astype(str) if v.strip()
-                )))
-                .reset_index()
-                .rename(columns={"observacao_fiscal": "_hist_obs"})
-            )
-            if not hist_obs.empty:
-                out = out.merge(hist_obs, on=["unidade_padrao", "operadora_padrao"], how="left")
-                # Só preenche onde observacao_fiscal está vazia
-                empty_mask = out["observacao_fiscal"].fillna("").astype(str).str.strip() == ""
-                out.loc[empty_mask, "observacao_fiscal"] = out.loc[empty_mask, "_hist_obs"].fillna("")
-                out = out.drop(columns=["_hist_obs"], errors="ignore")
+            hist_filtered = hist[hist["observacao_fiscal"].fillna("").astype(str).str.strip().ne("")].copy()
+            if not hist_filtered.empty:
+                hist_obs = (
+                    hist_filtered
+                    .groupby(["unidade_padrao", "operadora_padrao"])["observacao_fiscal"]
+                    .apply(lambda vals: " | ".join(dict.fromkeys(
+                        v.strip() for v in vals.fillna("").astype(str) if v.strip()
+                    )))
+                    .reset_index()
+                    .rename(columns={"observacao_fiscal": "_hist_obs"})
+                )
+                if not hist_obs.empty:
+                    # Constrói dict de obs por (unidade, operadora) antes do merge
+                    hist_obs_dict = {
+                        (str(r["unidade_padrao"]).strip().upper(), str(r["operadora_padrao"]).strip().upper()): str(r["_hist_obs"])
+                        for _, r in hist_obs.iterrows()
+                        if str(r.get("_hist_obs", "")).strip()
+                    }
+                    # Passo 1: merge exato por unidade+operadora
+                    out = out.merge(hist_obs, on=["unidade_padrao", "operadora_padrao"], how="left")
+                    empty_mask = out["observacao_fiscal"].fillna("").astype(str).str.strip() == ""
+                    out.loc[empty_mask, "observacao_fiscal"] = out.loc[empty_mask, "_hist_obs"].fillna("")
+                    out = out.drop(columns=["_hist_obs"], errors="ignore")
+
+                    # Passo 2: fallback por substring para nomes que mudaram entre meses
+                    still_empty = out["observacao_fiscal"].fillna("").astype(str).str.strip() == ""
+                    if still_empty.any():
+                        for i in out[still_empty].index:
+                            u_curr = str(out.at[i, "unidade_padrao"]).strip().upper()
+                            o_curr = str(out.at[i, "operadora_padrao"]).strip().upper()
+                            for (u_h, o_h), obs_text in hist_obs_dict.items():
+                                u_match = u_h in u_curr or u_curr in u_h
+                                o_match = o_h == o_curr or o_h in o_curr or o_curr in o_h
+                                if u_match and o_match:
+                                    out.at[i, "observacao_fiscal"] = obs_text
+                                    break
     except Exception:
         pass  # consolidado_historico pode não existir
 
@@ -2668,7 +2690,7 @@ def build_consolidado_inline_payload(filtered: pd.DataFrame, fat_months: list[in
             }
 
     # Enriquece com observações históricas de consolidado_historico
-    # (28 pares unidade+operadora com observacao_fiscal preenchida)
+    # Usa match exato primeiro, depois fallback por prefixo/substring de unidade+operadora
     try:
         hist_table = read_table("consolidado_historico")
         if not hist_table.empty and "observacao_fiscal" in hist_table.columns:
@@ -2682,21 +2704,45 @@ def build_consolidado_inline_payload(filtered: pd.DataFrame, fat_months: list[in
                     + hist_with_obs["operadora_padrao"].fillna("").astype(str).apply(norm_text)
                 )
                 hist_obs_map = (
-                    hist_with_obs.groupby("_key")["observacao_fiscal"]
-                    .apply(lambda vals: " | ".join(dict.fromkeys(
-                        v.strip() for v in vals.fillna("").astype(str) if v.strip()
-                    )))
-                    .to_dict()
+                    hist_with_obs.groupby("_key")[["observacao_fiscal", "unidade_padrao", "operadora_padrao"]]
+                    .agg(
+                        obs=("observacao_fiscal", lambda vals: " | ".join(dict.fromkeys(
+                            v.strip() for v in vals.fillna("").astype(str) if v.strip()
+                        ))),
+                        u_norm=("unidade_padrao", lambda x: norm_text(x.iloc[0])),
+                        o_norm=("operadora_padrao", lambda x: norm_text(x.iloc[0])),
+                    )
                 )
-                for key, obs_text in hist_obs_map.items():
+                # 1) Match exato
+                for key, row_h in hist_obs_map.iterrows():
+                    obs_text = row_h["obs"]
                     if not obs_text:
                         continue
                     if key in fresh_lookup:
-                        # Só adiciona do histórico se base_dinamica não tiver observação
                         if not fresh_lookup[key].get("observation"):
                             fresh_lookup[key]["observation"] = obs_text
                     else:
                         fresh_lookup[key] = {"signal": "", "observation": obs_text}
+
+                # 2) Fallback: para chaves do hist sem match exato, tenta encontrar
+                #    chave em fresh_lookup que contenha a unidade+operadora do hist como prefixo/substring
+                for hist_key, row_h in hist_obs_map.iterrows():
+                    obs_text = row_h["obs"]
+                    if not obs_text:
+                        continue
+                    if hist_key in fresh_lookup:
+                        continue  # já foi resolvido no passo 1
+                    u_h = row_h["u_norm"]  # ex: "natal home care"
+                    o_h = row_h["o_norm"]  # ex: "cnu"
+                    # Procura chaves do fresh_lookup que contenham u_h e o_h como substrings
+                    for fl_key in list(fresh_lookup.keys()):
+                        if u_h in fl_key and o_h in fl_key:
+                            if not fresh_lookup[fl_key].get("observation"):
+                                fresh_lookup[fl_key]["observation"] = obs_text
+                            break
+                    else:
+                        # Ainda sem match: adiciona com a chave original do histórico
+                        fresh_lookup[hist_key] = {"signal": "", "observation": obs_text}
     except Exception:
         pass  # consolidado_historico pode não existir em todos os ambientes
 
