@@ -5832,19 +5832,21 @@ def render_faturado_vs_recebido_chart(dash: pd.DataFrame):
     # ── Gráfico por Unidade (breakdown) ──────────────────────────────────────
     if not sel_units or len(sel_units) > 1:
         with st.expander("🏥 Detalhamento por Unidade", expanded=False):
-            fat_u = (
-                hf[hf["tipo"] == "FATURADO"]
-                .groupby("unidade_padrao")["valor"].sum()
-                .reset_index()
-                .rename(columns={"valor": "faturado"})
-            )
-            rec_u = (
-                hf[hf["tipo"].isin(["RECEBIDO_BRUTO", "RECEBIDO"])]
-                .groupby("unidade_padrao")["valor"].sum()
-                .reset_index()
-                .rename(columns={"valor": "recebido"})
-            )
-            resumo_u = fat_u.merge(rec_u, on="unidade_padrao", how="outer").fillna(0)
+            u_rows = []
+            for u in hf["unidade_padrao"].unique():
+                u_df = hf[hf["unidade_padrao"] == u]
+                fat_val = 0
+                rec_val = 0
+                for mes in active_months:
+                    fat_col = f"fat_{mes}"
+                    rec_col = f"rec_bruto_{mes}"
+                    if fat_col in u_df.columns:
+                        fat_val += pd.to_numeric(u_df[fat_col], errors="coerce").fillna(0).sum()
+                    if rec_col in u_df.columns:
+                        rec_val += pd.to_numeric(u_df[rec_col], errors="coerce").fillna(0).sum()
+                u_rows.append({"unidade_padrao": u, "faturado": fat_val, "recebido": rec_val})
+            
+            resumo_u = pd.DataFrame(u_rows)
             resumo_u["perc"] = (resumo_u["recebido"] / resumo_u["faturado"].replace(0, float("nan"))).fillna(0) * 100
             resumo_u = resumo_u.sort_values("faturado", ascending=False)
 
