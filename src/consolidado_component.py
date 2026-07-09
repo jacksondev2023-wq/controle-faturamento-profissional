@@ -486,6 +486,9 @@ export default function(component) {
                     // Linha de total da unidade (apenas exibe)
                     td.textContent = formatMoney(rawValue);
                 }
+            } else {
+                td.textContent = row.values?.[column.key] || "";
+            }
 
             tr.appendChild(td);
         });
@@ -501,7 +504,7 @@ export default function(component) {
 
 
 consolidado_inline_table = st.components.v2.component(
-    "consolidado_inline_table",
+    "consolidado_inline_table_v2",
     html=COMPONENT_HTML,
     css=COMPONENT_CSS,
     js=COMPONENT_JS,

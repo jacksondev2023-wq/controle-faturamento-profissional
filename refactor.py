@@ -1,154 +1,136 @@
 import re
 
-with open("app.py", "r", encoding="utf-8") as f:
-    code = f.read()
+with open('app.py', 'r', encoding='utf-8') as f:
+    content = f.read()
 
-# 1. source_values_for_depara
-old_source_values = """def source_values_for_depara(fat: pd.DataFrame, cont: pd.DataFrame, column: str) -> set[str]:
-    v_fat = set(fat[column].astype(str).unique()) if column in fat and not fat.empty else set()
-    v_cont = set(cont[column].astype(str).unique()) if column in cont and not cont.empty else set()
-    return {norm_text(v) for v in v_fat.union(v_cont) if str(v).strip() and str(v).lower() != "nan"}"""
+# 1. Replace f1, f2, f3, f4 columns block
+old_filters = '''    f1, f2, f3, f4 = st.columns([1, 1, 1.4, 0.9])
+    with f1:
+        selected_unit = st.selectbox("Unidade", ["Todas Unidades"] + sorted(dash["unidade_padrao"].dropna().unique().tolist()))
+    with f2:
+        selected_operator = st.selectbox("Operadora", ["Todas Operadoras"] + sorted(dash["operadora_padrao"].dropna().unique().tolist()))
+    with f3:
+        selected_status = st.multiselect("Status", sorted(dash["status"].dropna().unique().tolist()), placeholder="Todos")
+    with f4:
+        only_director_alerts = st.checkbox("Somente vermelhos", key="consolidado_only_director_alerts")'''
 
-new_source_values = """def source_values_for_depara(df: pd.DataFrame, column: str) -> set[str]:
-    v = set(df[column].astype(str).unique()) if column in df and not df.empty else set()
-    return {norm_text(val) for val in v if str(val).strip() and str(val).lower() != "nan"}"""
+new_filters = '''    f1, f2, f3, f4, f5 = st.columns([1, 1, 1.2, 0.8, 0.8])
+    with f1:
+        selected_unit = st.selectbox("Unidade", ["Todas Unidades"] + sorted(dash["unidade_padrao"].dropna().unique().tolist()))
+    with f2:
+        selected_operator = st.selectbox("Operadora", ["Todas Operadoras"] + sorted(dash["operadora_padrao"].dropna().unique().tolist()))
+    with f3:
+        selected_status = st.multiselect("Status", sorted(dash["status"].dropna().unique().tolist()), placeholder="Todos")
+    with f4:
+        only_director_alerts = st.checkbox("Somente vermelhos", key="consolidado_only_director_alerts")
+    with f5:
+        sort_order = st.selectbox("Ordem (A-Z)", ["Padrão", "A-Z", "Z-A"])'''
 
-code = code.replace(old_source_values, new_source_values)
+content = content.replace(old_filters, new_filters)
 
-# 2. Inicialização
-old_init = """depara = read_table("de_para_unidades")
-if depara.empty:
-    depara = DEFAULT_DEPARA.copy()
-    write_table("de_para_unidades", depara)
-depara_operadoras = read_table("de_para_operadoras")
-if depara_operadoras.empty:
-    depara_operadoras = DEFAULT_OPERADORA_DEPARA.copy()
-    write_table("de_para_operadoras", depara_operadoras)"""
+# 2. Replace the render call
+old_render = '''    st.markdown('<div class="section-title">Consolidado por Unidade e Operadora</div>', unsafe_allow_html=True)
+    render_consolidado_sheet_table(filtered, fat_months, rec_months)
+    st.caption(f"Mostrando {len(filtered)} linhas analíticas, agrupadas por {filtered['unidade_padrao'].nunique()} unidades. Última sincronização: {datetime.now().strftime('%d/%m/%Y %H:%M')}")'''
 
-new_init = """depara_legado = read_table("de_para_unidades")
-depara_ops_legado = read_table("de_para_operadoras")
+new_render = '''    st.markdown('<div class="section-title">Consolidado por Unidade e Operadora</div>', unsafe_allow_html=True)
+    render_consolidado_editable_table(filtered, fat_months, rec_months, sort_order, int(year))
+    st.caption(f"Mostrando {len(filtered)} linhas analíticas, agrupadas por {filtered['unidade_padrao'].nunique()} unidades. Última sincronização: {datetime.now().strftime('%d/%m/%Y %H:%M')}")'''
 
-depara_fat = read_table("de_para_unidades_fat")
-if depara_fat.empty:
-    depara_fat = depara_legado.copy() if not depara_legado.empty else DEFAULT_DEPARA.copy()
-    write_table("de_para_unidades_fat", depara_fat)
+content = content.replace(old_render, new_render)
 
-depara_cont = read_table("de_para_unidades_cont")
-if depara_cont.empty:
-    depara_cont = depara_legado.copy() if not depara_legado.empty else DEFAULT_DEPARA.copy()
-    write_table("de_para_unidades_cont", depara_cont)
+# 3. Add render_consolidado_editable_table
+new_func = '''
+def render_consolidado_editable_table(filtered: pd.DataFrame, fat_months: list[int], rec_months: list[int], sort_order: str, year: int):
+    fat_cols = [f"fat_{month}" for month in fat_months if f"fat_{month}" in filtered]
+    rec_cols = [f"rec_bruto_{month}" for month in rec_months if f"rec_bruto_{month}" in filtered]
+    
+    work = filtered.copy()
+    if sort_order == "A-Z":
+        work = work.sort_values(["unidade_padrao", "operadora_padrao"], ascending=[True, True])
+    elif sort_order == "Z-A":
+        work = work.sort_values(["unidade_padrao", "operadora_padrao"], ascending=[False, True])
+    else:
+        if "ordem_base_dinamica" not in work:
+            work["ordem_base_dinamica"] = range(1, len(work) + 1)
+        work["ordem_base_dinamica"] = pd.to_numeric(work["ordem_base_dinamica"], errors="coerce").fillna(999999)
+        work = work.sort_values(["ordem_base_dinamica", "operadora_padrao"], ascending=[True, True])
+        
+    edit_df = work[["unidade_padrao", "operadora_padrao"] + fat_cols + rec_cols + ["observacoes_consolidadas"]].copy()
+    edit_df = edit_df.reset_index(drop=True)
+    
+    col_config = {
+        "unidade_padrao": st.column_config.TextColumn("Unidade", disabled=True, width="medium"),
+        "operadora_padrao": st.column_config.TextColumn("Operadora", disabled=True, width="medium"),
+        "observacoes_consolidadas": st.column_config.TextColumn("Observações", disabled=True, width="large")
+    }
+    for m in fat_months:
+        c = f"fat_{m}"
+        col_config[c] = st.column_config.NumberColumn(f"Fat {MONTHS.get(m, m)}", format="R$ %.2f")
+    for m in rec_months:
+        c = f"rec_bruto_{m}"
+        col_config[c] = st.column_config.NumberColumn(f"Rec {MONTHS.get(m, m)}", format="R$ %.2f")
+        
+    edited = st.data_editor(
+        edit_df,
+        hide_index=True,
+        column_config=col_config,
+        use_container_width=True,
+        key="consolidado_editor"
+    )
+    
+    import time
+    changed = False
+    for col in fat_cols + rec_cols:
+        edited_col = pd.to_numeric(edited[col], errors='coerce').fillna(0)
+        orig_col = pd.to_numeric(edit_df[col], errors='coerce').fillna(0)
+        diff = edited_col - orig_col
+        changed_mask = diff.abs() > 0.01
+        
+        if changed_mask.any():
+            ensure_lancamentos_manuais_table()
+            lanc = read_table("lancamentos_manuais")
+            new_rows = []
+            
+            for idx in diff[changed_mask].index:
+                val_diff = diff.loc[idx]
+                unidade = edit_df.loc[idx, "unidade_padrao"]
+                operadora = edit_df.loc[idx, "operadora_padrao"]
+                
+                tipo = "Faturamento Extra" if col.startswith("fat_") else "Recebimento Extra"
+                mes = int(col.split("_")[1]) if col.startswith("fat_") else int(col.split("_")[2])
+                
+                new_id = int(lanc["id"].max() + 1) if not lanc.empty and "id" in lanc else 1
+                if new_rows:
+                    new_id = max(new_id, new_rows[-1]["id"] + 1)
+                    
+                new_rows.append({
+                    "id": new_id,
+                    "unidade_padrao": unidade,
+                    "operadora_padrao": operadora,
+                    "mes_referencia": mes,
+                    "ano_referencia": year,
+                    "tipo_lancamento": tipo,
+                    "valor": float(val_diff),
+                    "motivo": "Edição direta Consolidado",
+                    "atualizado_por": "sistema",
+                    "atualizado_em": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                })
+            
+            if new_rows:
+                append_table("lancamentos_manuais", pd.DataFrame(new_rows))
+                changed = True
+                
+    if changed:
+        if "consolidado_editor" in st.session_state:
+            del st.session_state["consolidado_editor"]
+        st.toast("✅ Valores atualizados! Recalculando dashboard...")
+        time.sleep(0.5)
+        st.rerun()
+'''
 
-depara_ops_fat = read_table("de_para_operadoras_fat")
-if depara_ops_fat.empty:
-    depara_ops_fat = depara_ops_legado.copy() if not depara_ops_legado.empty else DEFAULT_OPERADORA_DEPARA.copy()
-    write_table("de_para_operadoras_fat", depara_ops_fat)
+content += new_func
 
-depara_ops_cont = read_table("de_para_operadoras_cont")
-if depara_ops_cont.empty:
-    depara_ops_cont = depara_ops_legado.copy() if not depara_ops_legado.empty else DEFAULT_OPERADORA_DEPARA.copy()
-    write_table("de_para_operadoras_cont", depara_ops_cont)
-
-# Aliases de compatibilidade para partes da UI que nao precisaram dividir
-depara = depara_fat
-depara_operadoras = depara_ops_fat"""
-
-code = code.replace(old_init, new_init)
-
-# 3. Import Panels
-old_import_fat = """        render_import_panel(
-            title="Faturamento",
-            subtitle="Formatos aceitos: .xlsx, .xls",
-            file_key="file_fat",
-            tipo="Faturamento IW",
-            year=int(year),
-            depara=depara,
-            depara_operadoras=depara_operadoras,
-        )"""
-new_import_fat = """        render_import_panel(
-            title="Faturamento",
-            subtitle="Formatos aceitos: .xlsx, .xls",
-            file_key="file_fat",
-            tipo="Faturamento IW",
-            year=int(year),
-            depara=depara_fat,
-            depara_operadoras=depara_ops_fat,
-        )"""
-
-old_import_cont = """        render_import_panel(
-            title="Contabilidade / Recebimentos",
-            subtitle="Formatos aceitos: .xlsx, .xls",
-            file_key="file_cont",
-            tipo="Contabilidade/Recebimentos",
-            year=int(year),
-            depara=depara,
-            depara_operadoras=depara_operadoras,
-        )"""
-new_import_cont = """        render_import_panel(
-            title="Contabilidade / Recebimentos",
-            subtitle="Formatos aceitos: .xlsx, .xls",
-            file_key="file_cont",
-            tipo="Contabilidade/Recebimentos",
-            year=int(year),
-            depara=depara_cont,
-            depara_operadoras=depara_ops_cont,
-        )"""
-
-code = code.replace(old_import_fat, new_import_fat)
-code = code.replace(old_import_cont, new_import_cont)
-
-ui_regex = r"depara_units_tab, depara_ops_tab = st\.tabs\(\[\"DE/PARA de Unidades\", \"DE/PARA de Operadoras\"\]\).*?Buscar operadora.*?,\n\s*\)"
-
-new_ui = """    depara_units_fat_tab, depara_ops_fat_tab, depara_units_cont_tab, depara_ops_cont_tab = st.tabs([
-        "Unidades (Fat.)", 
-        "Operadoras (Fat.)",
-        "Unidades (Rec.)",
-        "Operadoras (Rec.)"
-    ])
-
-    with depara_units_fat_tab:
-        render_depara_manager(
-            title="DE/PARA de Unidades (Faturamento)",
-            description="Controle os nomes de filiais/unidades vindos do faturamento.",
-            mapping=depara_fat,
-            source_values=source_values_for_depara(fat, "unidade_original"),
-            table_name="de_para_unidades_fat",
-            key_prefix="depara_unidades_fat",
-            search_placeholder="Buscar unidade...",
-        )
-    with depara_ops_fat_tab:
-        render_depara_manager(
-            title="DE/PARA de Operadoras (Faturamento)",
-            description="Padronize convênios vindos do faturamento.",
-            mapping=depara_ops_fat,
-            source_values=source_values_for_depara(fat, "operadora_original"),
-            table_name="de_para_operadoras_fat",
-            key_prefix="depara_ops_fat",
-            search_placeholder="Buscar operadora...",
-        )
-    with depara_units_cont_tab:
-        render_depara_manager(
-            title="DE/PARA de Unidades (Recebimento)",
-            description="Controle os nomes de filiais/unidades vindos da contabilidade.",
-            mapping=depara_cont,
-            source_values=source_values_for_depara(cont, "unidade_original"),
-            table_name="de_para_unidades_cont",
-            key_prefix="depara_unidades_cont",
-            search_placeholder="Buscar unidade...",
-        )
-    with depara_ops_cont_tab:
-        render_depara_manager(
-            title="DE/PARA de Operadoras (Recebimento)",
-            description="Padronize convênios vindos da contabilidade.",
-            mapping=depara_ops_cont,
-            source_values=source_values_for_depara(cont, "operadora_original"),
-            table_name="de_para_operadoras_cont",
-            key_prefix="depara_ops_cont",
-            search_placeholder="Buscar operadora...",
-        )"""
-
-code = re.sub(ui_regex, new_ui, code, flags=re.DOTALL)
-
-with open("app.py", "w", encoding="utf-8") as f:
-    f.write(code)
-
-print("SUCESSO")
+with open('app.py', 'w', encoding='utf-8') as f:
+    f.write(content)
+print("done")
