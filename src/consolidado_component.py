@@ -407,70 +407,85 @@ export default function(component) {
                 }
 
                 td.appendChild(observationWrap);
-            } else if ((column.kind === "money" || column.kind === "fat") && isDetail) {
-                let rawValue = row.values?.[column.key] || "";
-                const display = document.createElement("span");
-                display.className = "editable-value";
-                display.textContent = rawValue;
-                display.title = "Clique para editar";
+            } else if ((column.kind === "money" || column.kind === "fat")) {
+                let rawValue = Number(row.values?.[column.key] || 0);
                 
-                td.style.cursor = "pointer";
-                display.style.display = "block";
-                display.style.width = "100%";
-                display.style.minHeight = "20px";
-                if (!rawValue) display.innerHTML = "&nbsp;";
+                function formatMoney(val) {
+                    if (Math.abs(val) < 0.005) return "";
+                    return "R$ " + val.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                }
 
-                td.appendChild(display);
+                if (isDetail) {
+                    const display = document.createElement("span");
+                    display.className = "editable-value";
+                    display.textContent = formatMoney(rawValue);
+                    display.title = "Clique para editar";
+                    
+                    td.style.cursor = "pointer";
+                    display.style.display = "block";
+                    display.style.width = "100%";
+                    display.style.minHeight = "20px";
+                    if (!rawValue) display.innerHTML = "&nbsp;";
 
-                td.addEventListener("click", (e) => {
-                    // Prevenir múltiplos inputs se já estiver editando
-                    if (td.querySelector("input")) return;
+                    td.appendChild(display);
 
-                    const input = document.createElement("input");
-                    input.type = "text";
-                    input.className = "inline-edit-input";
-                    input.value = rawValue.replace(/R\$\s?/g, "").replace(/\./g, "").replace(",", ".");
-                    input.style.width = "100%";
-                    input.style.border = "2px solid #002E7A";
-                    input.style.borderRadius = "3px";
-                    input.style.padding = "2px 4px";
-                    input.style.fontSize = "0.86rem";
-                    input.style.textAlign = "right";
-                    input.style.outline = "none";
-                    input.style.background = "#FFFFFF";
+                    td.addEventListener("click", (e) => {
+                        if (td.querySelector("input")) return;
 
-                    td.replaceChildren(input);
-                    input.focus();
-                    input.select();
+                        const input = document.createElement("input");
+                        input.type = "text";
+                        input.className = "inline-edit-input";
+                        // Quando edita, exibe no formato brasileiro (ex: 1234,56 sem ponto de milhar)
+                        input.value = rawValue ? rawValue.toFixed(2).replace(".", ",") : "";
+                        input.style.width = "100%";
+                        input.style.border = "2px solid #002E7A";
+                        input.style.borderRadius = "3px";
+                        input.style.padding = "2px 4px";
+                        input.style.fontSize = "0.86rem";
+                        input.style.textAlign = "right";
+                        input.style.outline = "none";
+                        input.style.background = "#FFFFFF";
 
-                    function commitEdit() {
-                        const newVal = input.value.trim();
-                        const numVal = parseFloat(newVal.replace(/R\$\s?/g, "").replace(/\./g, "").replace(",", ".") || "0");
-                        const formatted = isNaN(numVal) || Math.abs(numVal) < 0.005
-                            ? ""
-                            : "R$ " + numVal.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-                        display.innerHTML = formatted || "&nbsp;";
-                        
-                        rawValue = String(numVal);
-                        td.replaceChildren(display);
-                        sendAction({
-                            type: "value_edit",
-                            unidade: row.unidade,
-                            operadora: row.operadora,
-                            column: column.key,
-                            value: String(numVal),
+                        td.replaceChildren(input);
+                        input.focus();
+                        input.select();
+
+                        function commitEdit() {
+                            const newVal = input.value.trim();
+                            let parsedString = newVal.replace(/R\$\s?/g, "");
+                            
+                            // Se tem vírgula, tratamos pontos como milhares e a vírgula como decimal
+                            if (parsedString.includes(",")) {
+                                parsedString = parsedString.replace(/\./g, "").replace(",", ".");
+                            } else {
+                                // Se não tem vírgula, assumimos que qualquer ponto já é decimal
+                            }
+
+                            const numVal = parseFloat(parsedString || "0");
+                            rawValue = isNaN(numVal) ? 0 : numVal;
+                            
+                            display.innerHTML = formatMoney(rawValue) || "&nbsp;";
+                            td.replaceChildren(display);
+                            
+                            sendAction({
+                                type: "value_edit",
+                                unidade: row.unidade,
+                                operadora: row.operadora,
+                                column: column.key,
+                                value: String(rawValue),
+                            });
+                        }
+
+                        input.addEventListener("blur", commitEdit);
+                        input.addEventListener("keydown", (e) => {
+                            if (e.key === "Enter") { e.preventDefault(); input.blur(); }
+                            if (e.key === "Escape") { td.replaceChildren(display); }
                         });
-                    }
-
-                    input.addEventListener("blur", commitEdit);
-                    input.addEventListener("keydown", (e) => {
-                        if (e.key === "Enter") { e.preventDefault(); input.blur(); }
-                        if (e.key === "Escape") { td.replaceChildren(display); }
                     });
-                });
-            } else {
-                td.textContent = row.values?.[column.key] || "";
-            }
+                } else {
+                    // Linha de total da unidade (apenas exibe)
+                    td.textContent = formatMoney(rawValue);
+                }
 
             tr.appendChild(td);
         });
