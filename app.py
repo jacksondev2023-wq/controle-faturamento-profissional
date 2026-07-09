@@ -2754,7 +2754,16 @@ def build_consolidado_inline_payload(filtered: pd.DataFrame, fat_months: list[in
         errors="coerce",
     ).fillna(999999)
 
+    def safe_num(value) -> float:
+        """Converte valor para float seguro (0.0 se nulo/inválido)."""
+        try:
+            v = float(value or 0)
+            return v if v == v else 0.0  # NaN check
+        except Exception:
+            return 0.0
+
     def money_or_blank(value) -> str:
+        """Formata para exibição — usado apenas na UI, NÃO no payload de valores."""
         try:
             if abs(float(value or 0)) < 0.005:
                 return ""
@@ -2797,7 +2806,10 @@ def build_consolidado_inline_payload(filtered: pd.DataFrame, fat_months: list[in
             if not signal and as_bool_flag(detail.get("alerta_diretoria", 0)):
                 signal = "vermelho"
 
-            values_dict = {col: money_or_blank(detail.get(col, 0)) for col in money_cols}
+            # IMPORTANTE: envia valores NUMÉRICOS (não strings formatadas)
+            # O componente cuida da formatação BR na exibição
+            # Isso evita o bug da vírgula que desaparece ao editar
+            values_dict = {col: safe_num(detail.get(col, 0)) for col in money_cols}
             values_dict["observacoes_consolidadas"] = str(detail.get("observacoes_consolidadas", "") or "").strip()
             detail_rows.append({
                 "type": "detail",
@@ -2811,8 +2823,9 @@ def build_consolidado_inline_payload(filtered: pd.DataFrame, fat_months: list[in
             })
 
         unit_signal = aggregate_director_signal(row["signal"] for row in detail_rows)
+        # Totais da linha azul: soma dos valores numéricos brutos do dataframe
         unit_values = {
-            col: money_or_blank(pd.to_numeric(group[col], errors="coerce").fillna(0).sum())
+            col: pd.to_numeric(group[col], errors="coerce").fillna(0).sum()
             for col in money_cols
         }
         rows.append({
@@ -5346,7 +5359,22 @@ def persist_consolidado_inline_action():
             col_key = str(action.get("column", ""))
             value = action.get("value", "")
             if col_key:
-                numeric_val = float(str(value).replace("R$", "").replace(".", "").replace(",", ".").strip() or 0)
+                # Aceita valor num\u00e9rico puro (novo comportamento) OU string formatada (fallback)
+                try:
+                    if isinstance(value, (int, float)):
+                        numeric_val = float(value)
+                    else:
+                        # Fallback: remove formata\u00e7\u00e3o BR caso venha como string
+                        s = str(value).strip().replace("R$", "").strip()
+                        # Detecta formato BR (1.234,56) vs formato num\u00e9rico (1234.56)
+                        if "," in s and s.rindex(",") > s.rfind("."):
+                            # Formato BR: remove pontos de milhar, troca v\u00edrgula por ponto
+                            s = s.replace(".", "").replace(",", ".")
+                        elif "," in s:
+                            s = s.replace(",", "")
+                        numeric_val = float(s or 0)
+                except (ValueError, TypeError):
+                    numeric_val = 0.0
                 # Atualiza na base_dinamica (opcional, para exibir imediatamente)
                 _db_execute_sql(
                     f"UPDATE base_dinamica SET {col_key} = ? WHERE unidade_padrao = ? AND operadora_padrao = ?",
@@ -5581,7 +5609,9 @@ def render_lancamentos_manuais_tab():
         st.rerun()
 
 def render_faturado_vs_recebido_chart(dash: pd.DataFrame):
-    """Gráfico interativo de Faturado vs Recebido por mês, com filtros por unidade e mês."""
+    """Gráfico interativo de Faturado vs Recebido por mês, com filtros por unidade e mês.
+    Usa o dataframe 'dash' (consolidado real) como fonte de verdade — evita dupla contagem.
+    """
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
 
@@ -5590,28 +5620,25 @@ def render_faturado_vs_recebido_chart(dash: pd.DataFrame):
         6: "Jun", 7: "Jul", 8: "Ago", 9: "Set", 10: "Out", 11: "Nov", 12: "Dez"
     }
 
-    # Carrega dados históricos completos
-    try:
-        hist = read_table("consolidado_historico")
-    except Exception:
-        hist = pd.DataFrame()
-
-    if hist.empty:
-        # Fallback: usa o dash atual para calcular resumo
-        st.info("Dados históricos ainda sendo carregados. Exibindo resumo do mês atual.")
-        if "faturado" in dash.columns and "total_recebido_bruto" in dash.columns:
-            fat_tot = dash["faturado"].sum()
-            rec_tot = dash["total_recebido_bruto"].sum()
-            st.metric("Faturado Total", f"R$ {fat_tot:,.2f}")
-            st.metric("Recebido Total", f"R$ {rec_tot:,.2f}")
+    if dash.empty:
+        st.info("Nenhum dado disponível para o gráfico.")
         return
+
+    # Detecta colunas fat_X e rec_bruto_X disponíveis no dash
+    fat_month_cols = sorted(
+        [(int(c.split("_")[1]), c) for c in dash.columns if c.startswith("fat_") and c.split("_")[1].isdigit()],
+        key=lambda x: x[0]
+    )
+    rec_month_cols = sorted(
+        [(int(c.split("_")[-1]), c) for c in dash.columns if c.startswith("rec_bruto_") and c.split("_")[-1].isdigit()],
+        key=lambda x: x[0]
+    )
+    all_months_nums = sorted(set([m for m, _ in fat_month_cols] + [m for m, _ in rec_month_cols]))
 
     # ── Filtros ──────────────────────────────────────────────────────────────
     col_f1, col_f2, col_f3 = st.columns([3, 2, 2])
 
-    all_units = sorted(hist["unidade_padrao"].dropna().unique().tolist())
-    all_months = sorted(hist["mes"].dropna().unique().astype(int).tolist())
-    all_anos = sorted(hist["ano"].dropna().unique().astype(int).tolist())
+    all_units = sorted(dash["unidade_padrao"].dropna().unique().tolist())
 
     with col_f1:
         sel_units = st.multiselect(
@@ -5621,9 +5648,10 @@ def render_faturado_vs_recebido_chart(dash: pd.DataFrame):
             key="grafico_units",
         )
     with col_f2:
+        month_options = [MESES_NOME.get(m, str(m)) for m in all_months_nums]
         sel_months = st.multiselect(
             "Filtrar por Mês",
-            [MESES_NOME.get(m, str(m)) for m in all_months],
+            month_options,
             placeholder="Todos os meses",
             key="grafico_months",
         )
@@ -5634,40 +5662,31 @@ def render_faturado_vs_recebido_chart(dash: pd.DataFrame):
             key="grafico_type",
         )
 
-    # Aplica filtros
-    hf = hist.copy()
+    # Aplica filtro de unidade
+    hf = dash.copy()
     if sel_units:
         hf = hf[hf["unidade_padrao"].isin(sel_units)]
-
-    # Converte seleção de meses de volta para número
-    inv_mes = {v: k for k, v in MESES_NOME.items()}
-    if sel_months:
-        mes_nums = [inv_mes[m] for m in sel_months if m in inv_mes]
-        hf = hf[hf["mes"].isin(mes_nums)]
 
     if hf.empty:
         st.warning("Nenhum dado encontrado para os filtros selecionados.")
         return
 
-    # ── Agrega por mês ───────────────────────────────────────────────────────
-    fat_agg = (
-        hf[hf["tipo"] == "FATURADO"]
-        .groupby(["ano", "mes"])["valor"]
-        .sum()
-        .reset_index()
-        .rename(columns={"valor": "faturado"})
-    )
-    rec_agg = (
-        hf[hf["tipo"].isin(["RECEBIDO_BRUTO", "RECEBIDO"])]
-        .groupby(["ano", "mes"])["valor"]
-        .sum()
-        .reset_index()
-        .rename(columns={"valor": "recebido"})
-    )
+    # Converte meses selecionados para números
+    inv_mes = {v: k for k, v in MESES_NOME.items()}
+    active_months = [inv_mes[m] for m in sel_months if m in inv_mes] if sel_months else all_months_nums
 
-    resumo = fat_agg.merge(rec_agg, on=["ano", "mes"], how="outer").fillna(0)
-    resumo = resumo.sort_values(["ano", "mes"])
-    resumo["mes_label"] = resumo["mes"].apply(lambda m: MESES_NOME.get(int(m), str(m))) + "/" + resumo["ano"].astype(str).str[-2:]
+    # ── Agrega por mês direto das colunas fat_X / rec_bruto_X do dash ───────
+    # Usa apenas linhas de detalhe (operadora) — sem duplicar com totais de unidade
+    resumo_rows = []
+    for mes in active_months:
+        fat_col = f"fat_{mes}"
+        rec_col = f"rec_bruto_{mes}"
+        fat_val = pd.to_numeric(hf.get(fat_col, 0), errors="coerce").fillna(0).sum() if fat_col in hf.columns else 0
+        rec_val = pd.to_numeric(hf.get(rec_col, 0), errors="coerce").fillna(0).sum() if rec_col in hf.columns else 0
+        resumo_rows.append({"mes": mes, "faturado": fat_val, "recebido": rec_val})
+
+    resumo = pd.DataFrame(resumo_rows)
+    resumo["mes_label"] = resumo["mes"].apply(lambda m: MESES_NOME.get(int(m), str(m)))
     resumo["perc_recebido"] = (resumo["recebido"] / resumo["faturado"].replace(0, float("nan"))).fillna(0)
     resumo["diferenca"] = resumo["faturado"] - resumo["recebido"]
 
