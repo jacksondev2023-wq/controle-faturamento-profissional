@@ -20,7 +20,7 @@ from src.acerto_contas import (
     build_branch_net_summary,
     format_settlements_for_copy,
 )
-from src.consolidado_component import consolidado_inline_table
+from src.consolidado_table import consolidado_inline_table
 from src.etl import (
     MONTHS,
     DEFAULT_DEPARA,
