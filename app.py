@@ -5580,6 +5580,276 @@ def render_lancamentos_manuais_tab():
         clear_data_caches()
         st.rerun()
 
+def render_faturado_vs_recebido_chart(dash: pd.DataFrame):
+    """Gráfico interativo de Faturado vs Recebido por mês, com filtros por unidade e mês."""
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    MESES_NOME = {
+        1: "Jan", 2: "Fev", 3: "Mar", 4: "Abr", 5: "Mai",
+        6: "Jun", 7: "Jul", 8: "Ago", 9: "Set", 10: "Out", 11: "Nov", 12: "Dez"
+    }
+
+    # Carrega dados históricos completos
+    try:
+        hist = read_table("consolidado_historico")
+    except Exception:
+        hist = pd.DataFrame()
+
+    if hist.empty:
+        # Fallback: usa o dash atual para calcular resumo
+        st.info("Dados históricos ainda sendo carregados. Exibindo resumo do mês atual.")
+        if "faturado" in dash.columns and "total_recebido_bruto" in dash.columns:
+            fat_tot = dash["faturado"].sum()
+            rec_tot = dash["total_recebido_bruto"].sum()
+            st.metric("Faturado Total", f"R$ {fat_tot:,.2f}")
+            st.metric("Recebido Total", f"R$ {rec_tot:,.2f}")
+        return
+
+    # ── Filtros ──────────────────────────────────────────────────────────────
+    col_f1, col_f2, col_f3 = st.columns([3, 2, 2])
+
+    all_units = sorted(hist["unidade_padrao"].dropna().unique().tolist())
+    all_months = sorted(hist["mes"].dropna().unique().astype(int).tolist())
+    all_anos = sorted(hist["ano"].dropna().unique().astype(int).tolist())
+
+    with col_f1:
+        sel_units = st.multiselect(
+            "Filtrar por Unidade",
+            all_units,
+            placeholder="Todas as unidades",
+            key="grafico_units",
+        )
+    with col_f2:
+        sel_months = st.multiselect(
+            "Filtrar por Mês",
+            [MESES_NOME.get(m, str(m)) for m in all_months],
+            placeholder="Todos os meses",
+            key="grafico_months",
+        )
+    with col_f3:
+        chart_type = st.selectbox(
+            "Tipo de visualização",
+            ["Barras Agrupadas + % Recebido", "Barras Empilhadas", "Linha Dupla"],
+            key="grafico_type",
+        )
+
+    # Aplica filtros
+    hf = hist.copy()
+    if sel_units:
+        hf = hf[hf["unidade_padrao"].isin(sel_units)]
+
+    # Converte seleção de meses de volta para número
+    inv_mes = {v: k for k, v in MESES_NOME.items()}
+    if sel_months:
+        mes_nums = [inv_mes[m] for m in sel_months if m in inv_mes]
+        hf = hf[hf["mes"].isin(mes_nums)]
+
+    if hf.empty:
+        st.warning("Nenhum dado encontrado para os filtros selecionados.")
+        return
+
+    # ── Agrega por mês ───────────────────────────────────────────────────────
+    fat_agg = (
+        hf[hf["tipo"] == "FATURADO"]
+        .groupby(["ano", "mes"])["valor"]
+        .sum()
+        .reset_index()
+        .rename(columns={"valor": "faturado"})
+    )
+    rec_agg = (
+        hf[hf["tipo"].isin(["RECEBIDO_BRUTO", "RECEBIDO"])]
+        .groupby(["ano", "mes"])["valor"]
+        .sum()
+        .reset_index()
+        .rename(columns={"valor": "recebido"})
+    )
+
+    resumo = fat_agg.merge(rec_agg, on=["ano", "mes"], how="outer").fillna(0)
+    resumo = resumo.sort_values(["ano", "mes"])
+    resumo["mes_label"] = resumo["mes"].apply(lambda m: MESES_NOME.get(int(m), str(m))) + "/" + resumo["ano"].astype(str).str[-2:]
+    resumo["perc_recebido"] = (resumo["recebido"] / resumo["faturado"].replace(0, float("nan"))).fillna(0)
+    resumo["diferenca"] = resumo["faturado"] - resumo["recebido"]
+
+    # ── KPI Row ──────────────────────────────────────────────────────────────
+    tot_fat = resumo["faturado"].sum()
+    tot_rec = resumo["recebido"].sum()
+    tot_dif = resumo["diferenca"].sum()
+    avg_pct = resumo["perc_recebido"].mean()
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("💰 Faturado Total", f"R$ {tot_fat/1e6:.2f}M")
+    k2.metric("✅ Recebido Total", f"R$ {tot_rec/1e6:.2f}M", delta=f"-R$ {tot_dif/1e6:.2f}M pendente")
+    k3.metric("⏳ Pendente", f"R$ {tot_dif/1e6:.2f}M")
+    k4.metric("📈 % Médio Recebido", f"{avg_pct*100:.1f}%")
+
+    st.markdown("---")
+
+    # ── Gráfico Plotly ───────────────────────────────────────────────────────
+    COLORS = {
+        "fat":  "#1A3A6B",   # azul escuro
+        "rec":  "#27AE60",   # verde
+        "dif":  "#E74C3C",   # vermelho
+        "pct":  "#F39C12",   # laranja/âmbar
+    }
+
+    if chart_type == "Barras Agrupadas + % Recebido":
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+        fig.add_trace(go.Bar(
+            name="Faturado",
+            x=resumo["mes_label"],
+            y=resumo["faturado"],
+            marker_color=COLORS["fat"],
+            text=[f"R$ {v/1e6:.2f}M" for v in resumo["faturado"]],
+            textposition="outside",
+            textfont=dict(size=10, color=COLORS["fat"]),
+        ), secondary_y=False)
+
+        fig.add_trace(go.Bar(
+            name="Recebido",
+            x=resumo["mes_label"],
+            y=resumo["recebido"],
+            marker_color=COLORS["rec"],
+            text=[f"R$ {v/1e6:.2f}M" for v in resumo["recebido"]],
+            textposition="outside",
+            textfont=dict(size=10, color=COLORS["rec"]),
+        ), secondary_y=False)
+
+        fig.add_trace(go.Scatter(
+            name="% Recebido",
+            x=resumo["mes_label"],
+            y=resumo["perc_recebido"] * 100,
+            mode="lines+markers+text",
+            line=dict(color=COLORS["pct"], width=3, dash="dot"),
+            marker=dict(size=10, color=COLORS["pct"], symbol="diamond"),
+            text=[f"{v*100:.1f}%" for v in resumo["perc_recebido"]],
+            textposition="top center",
+            textfont=dict(size=11, color=COLORS["pct"]),
+        ), secondary_y=True)
+
+        fig.update_layout(barmode="group")
+        fig.update_yaxes(title_text="Valor (R$)", tickformat=",.0f", secondary_y=False)
+        fig.update_yaxes(title_text="% Recebido", ticksuffix="%", range=[0, 120], secondary_y=True)
+
+    elif chart_type == "Barras Empilhadas":
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            name="Recebido", x=resumo["mes_label"], y=resumo["recebido"],
+            marker_color=COLORS["rec"],
+            text=[f"R$ {v/1e6:.2f}M" for v in resumo["recebido"]],
+            textposition="inside",
+        ))
+        fig.add_trace(go.Bar(
+            name="Pendente", x=resumo["mes_label"], y=resumo["diferenca"],
+            marker_color=COLORS["dif"],
+            text=[f"R$ {v/1e6:.2f}M" for v in resumo["diferenca"]],
+            textposition="inside",
+        ))
+        fig.update_layout(barmode="stack")
+        fig.update_yaxes(title_text="Valor (R$)", tickformat=",.0f")
+
+    else:  # Linha Dupla
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            name="Faturado", x=resumo["mes_label"], y=resumo["faturado"],
+            mode="lines+markers+text",
+            line=dict(color=COLORS["fat"], width=3),
+            marker=dict(size=10, color=COLORS["fat"]),
+            text=[f"R$ {v/1e6:.2f}M" for v in resumo["faturado"]],
+            textposition="top center",
+        ))
+        fig.add_trace(go.Scatter(
+            name="Recebido", x=resumo["mes_label"], y=resumo["recebido"],
+            mode="lines+markers+text",
+            line=dict(color=COLORS["rec"], width=3),
+            marker=dict(size=10, color=COLORS["rec"]),
+            text=[f"R$ {v/1e6:.2f}M" for v in resumo["recebido"]],
+            textposition="top center",
+        ))
+        fig.update_yaxes(title_text="Valor (R$)", tickformat=",.0f")
+
+    # Layout global do gráfico
+    fig.update_layout(
+        title=dict(
+            text="Faturado vs Recebido por Mês" + (f" — {', '.join(sel_units)}" if sel_units else ""),
+            font=dict(size=18, color="#17365D"),
+        ),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02,
+            xanchor="right", x=1,
+        ),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="Inter, sans-serif", size=12),
+        height=520,
+        margin=dict(l=60, r=60, t=80, b=40),
+        xaxis=dict(
+            showgrid=False,
+            linecolor="#dee2e6",
+            tickfont=dict(size=12, color="#495057"),
+        ),
+        yaxis=dict(
+            gridcolor="#f0f0f0",
+            linecolor="#dee2e6",
+            tickfont=dict(size=11),
+            tickprefix="R$ ",
+        ),
+        hovermode="x unified",
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ── Tabela resumo abaixo do gráfico ──────────────────────────────────────
+    with st.expander("📋 Tabela resumo mensal", expanded=False):
+        display_resumo = resumo[["mes_label", "faturado", "recebido", "diferenca", "perc_recebido"]].copy()
+        display_resumo.columns = ["Mês", "Faturado", "Recebido", "Diferença Pendente", "% Recebido"]
+        display_resumo["Faturado"] = display_resumo["Faturado"].apply(fmt_money)
+        display_resumo["Recebido"] = display_resumo["Recebido"].apply(fmt_money)
+        display_resumo["Diferença Pendente"] = display_resumo["Diferença Pendente"].apply(fmt_money)
+        display_resumo["% Recebido"] = (display_resumo["% Recebido"] * 100).map(lambda x: f"{x:.1f}%")
+        st.dataframe(display_resumo, use_container_width=True, hide_index=True)
+
+    # ── Gráfico por Unidade (breakdown) ──────────────────────────────────────
+    if not sel_units or len(sel_units) > 1:
+        with st.expander("🏥 Detalhamento por Unidade", expanded=False):
+            fat_u = (
+                hf[hf["tipo"] == "FATURADO"]
+                .groupby("unidade_padrao")["valor"].sum()
+                .reset_index()
+                .rename(columns={"valor": "faturado"})
+            )
+            rec_u = (
+                hf[hf["tipo"].isin(["RECEBIDO_BRUTO", "RECEBIDO"])]
+                .groupby("unidade_padrao")["valor"].sum()
+                .reset_index()
+                .rename(columns={"valor": "recebido"})
+            )
+            resumo_u = fat_u.merge(rec_u, on="unidade_padrao", how="outer").fillna(0)
+            resumo_u["perc"] = (resumo_u["recebido"] / resumo_u["faturado"].replace(0, float("nan"))).fillna(0) * 100
+            resumo_u = resumo_u.sort_values("faturado", ascending=False)
+
+            fig_u = go.Figure()
+            fig_u.add_trace(go.Bar(
+                name="Faturado", x=resumo_u["unidade_padrao"],
+                y=resumo_u["faturado"], marker_color=COLORS["fat"],
+            ))
+            fig_u.add_trace(go.Bar(
+                name="Recebido", x=resumo_u["unidade_padrao"],
+                y=resumo_u["recebido"], marker_color=COLORS["rec"],
+            ))
+            fig_u.update_layout(
+                barmode="group", height=380,
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                xaxis=dict(showgrid=False, tickangle=-30),
+                yaxis=dict(gridcolor="#f0f0f0", tickprefix="R$ ", tickformat=",.0f"),
+                legend=dict(orientation="h", y=1.05),
+                margin=dict(l=60, r=20, t=40, b=100),
+                font=dict(family="Inter, sans-serif"),
+            )
+            st.plotly_chart(fig_u, use_container_width=True)
+
+
 @st.fragment
 def render_consolidado_tabs(
     dash: pd.DataFrame,
@@ -5588,12 +5858,15 @@ def render_consolidado_tabs(
     rec_months: list[int],
     year: int,
 ):
-    analitico_tab, diferenca_tab, acerto_tab, manuais_tab = st.tabs([
-        "Analitico",
-        "Consolidado da diferenca",
+    grafico_tab, analitico_tab, diferenca_tab, acerto_tab, manuais_tab = st.tabs([
+        "📊 Gráfico Mensal",
+        "Analítico",
+        "Consolidado da diferença",
         "Acerto de contas",
         "Lançamentos Manuais",
     ])
+    with grafico_tab:
+        render_faturado_vs_recebido_chart(dash)
     with analitico_tab:
         colA, colB = st.columns([8, 2])
         with colA:
