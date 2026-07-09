@@ -504,7 +504,7 @@ export default function(component) {
 
 
 consolidado_inline_table = st.components.v2.component(
-    "consolidado_inline_table_v2",
+    "consolidado_inline_table_v3",
     html=COMPONENT_HTML,
     css=COMPONENT_CSS,
     js=COMPONENT_JS,
